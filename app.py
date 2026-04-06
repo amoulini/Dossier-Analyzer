@@ -16,18 +16,24 @@ import streamlit as st
 from openpyxl import Workbook
 
 from dossier_analyzer.extract import aggregate_folder_text
-from dossier_analyzer.match import RankedFolderMatch, normalize_keywords, ranked_folder_matches
+from dossier_analyzer.match import (
+    KeywordEntry,
+    RankedFolderMatch,
+    normalize_keyword_entries,
+    ranked_folder_matches,
+)
 from dossier_analyzer.scan import (
     TreeNode,
     build_tree,
     count_leaf_folders,
     iter_folder_nodes,
+    iter_leaf_folder_nodes,
 )
 
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parent / "data" / "dossiers"
 
 # Pass as first arg to folder_text_index so Streamlit cache keys never match stale disk entries.
-_CACHE_SERIAL = "dossier-analyzer-3"
+_CACHE_SERIAL = "dossier-analyzer-4"
 
 # Microsoft Excel product green (#217346); applied via CSS to the sole st.download_button in this app.
 _EXCEL_EXPORT_BTN_CSS = """
@@ -60,38 +66,79 @@ def _folder_key(node: TreeNode) -> str:
     return node.rel.as_posix()
 
 
-def _folder_label(node: TreeNode) -> str:
-    if node.rel == Path("."):
-        return node.name
-    return node.rel.as_posix()
+# Une couleur de fond distincte par note (0 → 5), progression chromatique rouge → vert.
+_POSITIVITY_CHIP_BG: tuple[str, ...] = (
+    "#a93226",  # 0 rouge
+    "#cb4335",  # 1 rouge brique
+    "#e67e22",  # 2 orange
+    "#d4ac0d",  # 3 or / jaune soutenu
+    "#28b463",  # 4 vert clair
+    "#1e8449",  # 5 vert
+)
 
 
-def _matches_to_excel_bytes(ranked: list[RankedFolderMatch], column_keywords: list[str]) -> bytes:
-    """One sheet: dossier path (relative) × keyword occurrence counts."""
+def _positivity_chip_colors(grade: int) -> tuple[str, str]:
+    """Fond et texte pour une pastille : teinte fixe par note de 0 à 5 (rouge → vert)."""
+    p = max(0, min(5, int(grade)))
+    bg = _POSITIVITY_CHIP_BG[p]
+    hx = bg.removeprefix("#")
+    rr = int(hx[0:2], 16)
+    gg = int(hx[2:4], 16)
+    bb = int(hx[4:6], 16)
+    lum = (0.299 * rr + 0.587 * gg + 0.114 * bb) / 255
+    fg = "#1a1a1a" if lum > 0.52 else "#ffffff"
+    return bg, fg
+
+
+def _empty_ranked_row(folder_key: str) -> RankedFolderMatch:
+    """Placeholder row for a leaf dossier with no keyword hits."""
+    return RankedFolderMatch(
+        folder_key=folder_key,
+        keyword_hits=(),
+        total_occurrences=0,
+        distinct_match_count=0,
+        weighted_rank_avg=0.0,
+        positivity_weighted_avg=0.0,
+    )
+
+
+def _matches_to_excel_bytes(ranked: list[RankedFolderMatch], columns: list[KeywordEntry]) -> bytes:
+    """Sheet 'Analyse': dossiers × counts; sheet 'Mots-clés': keyword ↔ grade (sorted by grade ↓)."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Analyse"
-    ws.append(["Dossier", *column_keywords])
+    headers = [e.text for e in columns]
+    ws.append(["Dossier", *headers])
+    ws.append(["Positivité (0–5)", *[str(e.positivity) for e in columns]])
     for row in ranked:
         hits = dict(row.keyword_hits)
-        ws.append([row.folder_key] + [hits.get(kw, 0) for kw in column_keywords])
+        ws.append([row.folder_key] + [hits.get(kw, 0) for kw in headers])
+
+    ws_kw = wb.create_sheet("Mots-clés — positivité", 1)
+    ws_kw.append(["Mot-clé", "Positivité (0–5)"])
+    for e in sorted(columns, key=lambda x: (-x.positivity, x.text.lower())):
+        ws_kw.append([e.text, e.positivity])
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
 @st.cache_data(show_spinner="Indexation des dossiers…")
-def folder_text_index(cache_version: str, root_str: str) -> dict[str, str]:
+def folder_text_index(
+    cache_version: str,
+    root_str: str,
+    leaves_only: bool,
+) -> dict[str, str]:
     root = Path(root_str).resolve()
     tree = build_tree(root)
     if tree is None:
         return {}
-    # Exclude the configured root folder itself from analysis results (only subfolders).
-    return {
-        _folder_key(n): aggregate_folder_text(n)
-        for n in iter_folder_nodes(tree)
-        if n.rel != Path(".")
-    }
+    if leaves_only:
+        nodes = iter_leaf_folder_nodes(tree)
+    else:
+        nodes = [n for n in iter_folder_nodes(tree) if n.rel != Path(".")]
+    return {_folder_key(n): aggregate_folder_text(n) for n in nodes}
 
 
 def _ensure_session() -> None:
@@ -99,17 +146,23 @@ def _ensure_session() -> None:
         st.session_state.selected_file = None
     if "kw_rows" not in st.session_state:
         st.session_state.kw_rows = [
-            {"id": "init-1", "text": "Excellent niveau"},
-            {"id": "init-2", "text": "Bon niveau"},
-            {"id": "init-3", "text": "Irrégulier"},
+            {"id": "init-1", "text": "Excellent niveau", "positivity": 5},
+            {"id": "init-2", "text": "Bon niveau", "positivity": 4},
+            {"id": "init-3", "text": "Irrégulier", "positivity": 1},
         ]
+    for r in st.session_state.kw_rows:
+        if "positivity" not in r:
+            r["positivity"] = 3
 
 
 def _init_kw_row_widgets() -> None:
     for row in st.session_state.kw_rows:
         wk = f"kw_{row['id']}"
+        pk = f"kw_pos_{row['id']}"
         if wk not in st.session_state:
             st.session_state[wk] = row["text"]
+        if pk not in st.session_state:
+            st.session_state[pk] = int(row.get("positivity", 3))
 
 
 def _make_persist_keyword(row_id: str):
@@ -124,10 +177,23 @@ def _make_persist_keyword(row_id: str):
     return _persist
 
 
-def _render_keyword_inputs() -> list[str]:
+def _make_persist_positivity(row_id: str):
+    def _persist() -> None:
+        pk = f"kw_pos_{row_id}"
+        val = int(st.session_state.get(pk, 3))
+        for r in st.session_state.kw_rows:
+            if r["id"] == row_id:
+                r["positivity"] = val
+                break
+
+    return _persist
+
+
+def _render_keyword_inputs() -> list[KeywordEntry]:
     st.caption(
         "Saisie dynamique : barre rouge à gauche. "
         "Recherche insensible à la casse, sous-chaîne dans tout le texte du dossier. "
+        "Tri Analyse : le curseur Positif (0–5) pondère le classement (0 = pas positif, 5 = très positif). "
         "Ces champs restent en place lorsque vous passez à l’onglet Dossiers."
     )
 
@@ -136,7 +202,7 @@ def _render_keyword_inputs() -> list[str]:
     remove_id: str | None = None
 
     for row in rows:
-        c0, c1, c2 = st.columns([0.04, 4.7, 1], gap="small")
+        c0, c1, c2, c3 = st.columns([0.04, 3.4, 1.4, 0.55], gap="small")
         with c0:
             st.markdown(
                 "<div style='background:#c0392b;width:4px;height:2.6rem;border-radius:3px;margin-top:2px'></div>",
@@ -151,6 +217,17 @@ def _render_keyword_inputs() -> list[str]:
                 on_change=_make_persist_keyword(row["id"]),
             )
         with c2:
+            st.slider(
+                "Positif",
+                min_value=0,
+                max_value=5,
+                step=1,
+                key=f"kw_pos_{row['id']}",
+                help="0 = pas positif … 5 = très positif — utilisé pour trier les dossiers",
+                label_visibility="collapsed",
+                on_change=_make_persist_positivity(row["id"]),
+            )
+        with c3:
             st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
             if st.button(
                 "🗑️",
@@ -163,73 +240,106 @@ def _render_keyword_inputs() -> list[str]:
     with c_add:
         if st.button("➕ Ajouter", width="stretch"):
             new_id = uuid.uuid4().hex[:10]
-            st.session_state.kw_rows.append({"id": new_id, "text": ""})
+            st.session_state.kw_rows.append({"id": new_id, "text": "", "positivity": 3})
             st.rerun()
 
     if remove_id is not None:
         st.session_state.kw_rows = [r for r in st.session_state.kw_rows if r["id"] != remove_id]
         st.session_state.pop(f"kw_{remove_id}", None)
+        st.session_state.pop(f"kw_pos_{remove_id}", None)
         st.session_state.pop(f"del_{remove_id}", None)
         st.rerun()
 
     for row in st.session_state.kw_rows:
         wk = f"kw_{row['id']}"
+        pk = f"kw_pos_{row['id']}"
         if wk in st.session_state:
             row["text"] = str(st.session_state[wk] or "")
+        if pk in st.session_state:
+            row["positivity"] = int(st.session_state[pk])
 
-    return [str(st.session_state.get(f"kw_{r['id']}", "") or "") for r in st.session_state.kw_rows]
+    return [
+        KeywordEntry(
+            str(st.session_state.get(f"kw_{r['id']}", "") or ""),
+            int(st.session_state.get(f"kw_pos_{r['id']}", r.get("positivity", 3))),
+        )
+        for r in st.session_state.kw_rows
+    ]
 
 
-def _render_match_cards(root_str: str, keywords: list[str]) -> None:
-    kws_norm = normalize_keywords(keywords)
+def _render_match_cards(root_str: str, entries: list[KeywordEntry]) -> None:
+    kws_norm = normalize_keyword_entries(entries)
     if not kws_norm:
         st.markdown("##### Dossiers correspondants")
         st.caption("Entrez au moins un mot-clé non vide ci-dessus.")
         return
 
-    corpus = folder_text_index(_CACHE_SERIAL, root_str)
-    ranked = ranked_folder_matches(corpus, keywords)
+    corpus = folder_text_index(_CACHE_SERIAL, root_str, True)
+    ranked = ranked_folder_matches(corpus, entries)
 
-    if ranked:
-        st.markdown(_EXCEL_EXPORT_BTN_CSS, unsafe_allow_html=True)
-
-    head_l, head_r = st.columns([4, 1])
+    head_l, head_c, head_r = st.columns([2.8, 2.2, 1], vertical_alignment="center")
     with head_l:
         st.markdown("##### Dossiers correspondants")
+    with head_c:
+        add_unmatched = st.checkbox(
+            "Ajouter les dossiers sans correspondance",
+            help="Inclure tous les dossiers finaux, même ceux sans aucune correspondance aux mots-clés (valeurs à zéro dans l’export).",
+            key="add_unmatched_leaf_dossiers",
+        )
+
+    matched_keys = {r.folder_key for r in ranked}
+    if add_unmatched:
+        extra_keys = sorted((k for k in corpus if k not in matched_keys), key=str.lower)
+        display_rows: list[RankedFolderMatch] = list(ranked) + [
+            _empty_ranked_row(k) for k in extra_keys
+        ]
+    else:
+        display_rows = list(ranked)
+
+    if display_rows:
+        st.markdown(_EXCEL_EXPORT_BTN_CSS, unsafe_allow_html=True)
     with head_r:
-        if ranked:
+        if display_rows:
             st.download_button(
-                "Export to Excel",
-                data=_matches_to_excel_bytes(ranked, kws_norm),
-                file_name="dossier_analyzer_matches.xlsx",
+                "Exporter vers Excel",
+                data=_matches_to_excel_bytes(display_rows, kws_norm),
+                file_name="analyse_dossiers.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="secondary",
                 width="stretch",
                 key="export_matches_xlsx",
             )
 
-    if not ranked:
-        st.info("Aucun dossier ne contient ces mots-clés (recherche insensible à la casse).")
+    if not display_rows:
+        if not corpus:
+            st.info("Aucun dossier final à analyser sous cette racine.")
+        else:
+            st.info("Aucun dossier ne contient ces mots-clés (recherche insensible à la casse).")
         return
 
-    tree = build_tree(Path(root_str).resolve())
-    key_to_node: dict[str, TreeNode] = {}
-    if tree is not None:
-        key_to_node = {_folder_key(n): n for n in iter_folder_nodes(tree)}
+    pos_by_kw = {e.text: e.positivity for e in kws_norm}
 
-    for row in ranked:
+    for row in display_rows:
         fk = row.folder_key
-        node = key_to_node.get(fk)
-        label = _folder_label(node) if node else fk
-        chips = "".join(
-            f"<span style='display:inline-block;margin:2px 6px 2px 0;padding:2px 10px;"
-            f"background:#ecf0f1;border-radius:999px;font-size:0.9em;'>"
-            f"{escape(kw)} <strong>({cnt})</strong></span>"
-            for kw, cnt in row.keyword_hits
-        )
+        if row.keyword_hits:
+            chip_parts: list[str] = []
+            for kw, cnt in row.keyword_hits:
+                bg, fg = _positivity_chip_colors(pos_by_kw.get(kw, 3))
+                chip_parts.append(
+                    f"<span style='display:inline-block;margin:2px 6px 2px 0;padding:2px 10px;"
+                    f"background:{bg};color:{fg};border-radius:999px;font-size:0.9em;"
+                    f"border:1px solid rgba(0,0,0,0.08);'>"
+                    f"{escape(kw)} <strong>({cnt})</strong></span>"
+                )
+            chips = "".join(chip_parts)
+        else:
+            chips = (
+                "<span style='display:inline-block;color:#7f8c8d;font-size:0.9em;font-style:italic;'>"
+                "Aucune correspondance</span>"
+            )
         badge = (
             f"<span style='display:inline-block;background:#1f77b4;color:white;padding:6px 14px;"
-            f"border-radius:8px;font-weight:600;margin-right:10px;'>{escape(label)}</span>"
+            f"border-radius:8px;font-weight:600;margin-right:10px;'>{escape(fk)}</span>"
         )
         st.markdown(
             f"<div style='margin:12px 0;padding:12px 14px;border:1px solid #dfe6e9;border-radius:10px;"
@@ -358,7 +468,7 @@ def main() -> None:
     n_final = count_leaf_folders(tree) if tree else 0
 
     with st.expander("Mots-clés — analyse", expanded=True):
-        kw_list = _render_keyword_inputs()
+        kw_entries = _render_keyword_inputs()
 
     tab_explorer, tab_analyse = st.tabs(["Dossiers (exploration)", "Analyse"])
 
@@ -377,7 +487,7 @@ def main() -> None:
             _render_document_viewer(root)
 
     with tab_analyse:
-        _render_match_cards(root_str, kw_list)
+        _render_match_cards(root_str, kw_entries)
 
 
 if __name__ == "__main__":

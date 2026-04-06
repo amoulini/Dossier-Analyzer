@@ -1,6 +1,12 @@
 # Theme: warm paper + teal accent (readable for long document sessions)
 # Restart the app after changing this file.
 
+# [client]
+# toolbarMode = “minimal”
+
+[ui]
+hideTopBar = true
+
 [theme]
 base = "light"
 

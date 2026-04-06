@@ -73,6 +73,18 @@ def count_leaf_folders(node: TreeNode | None) -> int:
     return sum(count_leaf_folders(c) for c in node.children)
 
 
+def iter_leaf_folder_nodes(node: TreeNode) -> list[TreeNode]:
+    """Terminal dossiers under this tree (no subfolders); excludes the scan root directory itself."""
+    if not node.children:
+        if node.rel == Path("."):
+            return []
+        return [node]
+    out: list[TreeNode] = []
+    for c in node.children:
+        out.extend(iter_leaf_folder_nodes(c))
+    return out
+
+
 def iter_folder_nodes(node: TreeNode) -> list[TreeNode]:
     out: list[TreeNode] = [node]
     for c in node.children:
