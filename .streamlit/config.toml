@@ -1,0 +1,22 @@
+# Theme: warm paper + teal accent (readable for long document sessions)
+# Restart the app after changing this file.
+
+[theme]
+base = "light"
+
+# Primary — selected row, main actions, focus ring
+primaryColor = "#0f766e"
+
+# Main canvas (warm off-white)
+backgroundColor = "#faf7f2"
+
+# Sidebar, cards, secondary buttons feel softer than pure white
+secondaryBackgroundColor = "#ede8df"
+
+# Body text (warm slate, not pure black)
+textColor = "#334155"
+
+# Links and inline accents harmonize with primary
+linkColor = "#0d9488"
+
+font = "sans serif"
