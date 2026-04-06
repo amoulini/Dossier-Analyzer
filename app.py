@@ -142,6 +142,8 @@ def folder_text_index(
 
 
 def _ensure_session() -> None:
+    if "browse_root" not in st.session_state:
+        st.session_state.browse_root = None
     if "selected_file" not in st.session_state:
         st.session_state.selected_file = None
     if "kw_rows" not in st.session_state:
@@ -153,6 +155,35 @@ def _ensure_session() -> None:
     for r in st.session_state.kw_rows:
         if "positivity" not in r:
             r["positivity"] = 3
+
+
+def _render_workspace_picker(*, example_path: str) -> None:
+    """Premier écran : choisir explicitement le dossier racine avant le reste de l’application."""
+    if "root_path_input" not in st.session_state:
+        st.session_state.root_path_input = os.environ.get("DOSSIER_ANALYZER_ROOT", "")
+
+    st.title("Dossier Analyzer")
+    st.markdown(
+        "Bienvenue. **Indiquez le dossier racine** contenant les dossiers à explorer et à analyser, "
+        "puis cliquez sur **Ouvrir ce dossier**."
+    )
+    st.caption(f"Exemple de chemin : `{example_path}`")
+    st.text_input(
+        "Chemin du dossier racine",
+        key="root_path_input",
+        placeholder="Collez le chemin absolu du dossier…",
+    )
+    raw = str(st.session_state.get("root_path_input", "") or "").strip()
+    cand = Path(raw).expanduser().resolve() if raw else None
+    if st.button("Ouvrir ce dossier", type="primary"):
+        if cand is not None and cand.is_dir():
+            st.session_state.browse_root = str(cand)
+            st.session_state.selected_file = None
+            st.rerun()
+        elif raw == "":
+            st.warning("Saisissez un chemin vers un dossier existant.")
+        else:
+            st.error("Ce chemin n’est pas un dossier valide.")
 
 
 def _init_kw_row_widgets() -> None:
@@ -445,22 +476,26 @@ def main() -> None:
     st.set_page_config(page_title="Dossier Analyzer", layout="wide")
     _ensure_session()
 
+    example_path = os.environ.get("DOSSIER_ANALYZER_ROOT") or str(DEFAULT_DATA_ROOT.resolve())
+    if st.session_state.browse_root is None:
+        _render_workspace_picker(example_path=example_path)
+        st.stop()
+
+    root = Path(st.session_state.browse_root).resolve()
+
     st.title("Dossier Analyzer")
     st.caption("Exploration de dossiers et analyse par mots-clés.")
-    default_root = os.environ.get("DOSSIER_ANALYZER_ROOT", str(DEFAULT_DATA_ROOT))
     with st.sidebar:
-        st.markdown("### Racine des dossiers")
-        root_input = st.text_input(
-            "Chemin",
-            value=default_root,
-            label_visibility="collapsed",
-            key="root_path_input",
-        )
-        root = Path(root_input).expanduser().resolve()
-        if not root.is_dir():
-            st.error("Ce chemin n’est pas un dossier valide.")
+        st.markdown("### Dossier de travail")
+        st.text(str(root))
+        if st.button("Changer de dossier", use_container_width=True):
+            st.session_state.browse_root = None
+            st.session_state.selected_file = None
+            st.session_state.pop("root_path_input", None)
+            st.rerun()
 
     if not root.is_dir():
+        st.error("Le dossier de travail n’est plus accessible. Choisissez-en un autre (barre latérale).")
         st.stop()
 
     root_str = str(root)

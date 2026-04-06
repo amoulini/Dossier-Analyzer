@@ -1,0 +1,10 @@
+services:
+  dossier-analyzer:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      DOSSIER_ANALYZER_ROOT: /data
+    volumes:
+      - ./data:/data:ro
+    restart: unless-stopped
