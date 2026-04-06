@@ -1,5 +1,5 @@
 """
-Streamlit app: dossier exploration (tree + viewer) and keyword-based folder analysis.
+Dossier Analyzer — Streamlit app: dossier exploration (tree + viewer) and keyword-based folder analysis.
 """
 
 from __future__ import annotations
@@ -14,15 +14,14 @@ from pathlib import Path
 import fitz  # PyMuPDF
 import streamlit as st
 
-from dossierkit.extract import aggregate_folder_text
-from dossierkit.match import ranked_folder_matches
-from dossierkit.scan import TreeNode, build_tree, count_folders, iter_folder_nodes
+from dossier_analyzer.extract import aggregate_folder_text
+from dossier_analyzer.match import ranked_folder_matches
+from dossier_analyzer.scan import TreeNode, build_tree, count_folders, iter_folder_nodes
 
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parent / "data" / "dossiers"
 
-# Bump when the package name or cached types change so old pickles are not reused
-# (unpickling would try to import stale module paths, e.g. studentanalyzer).
-_CACHE_SERIAL = "dossierkit-1"
+# Pass as first arg to folder_text_index so Streamlit cache keys never match stale disk entries.
+_CACHE_SERIAL = "dossier-analyzer-3"
 
 
 def _safe_widget_key(path_str: str, prefix: str) -> str:
@@ -43,7 +42,7 @@ def _folder_label(node: TreeNode) -> str:
 
 
 @st.cache_data(show_spinner="Indexation des dossiers…")
-def folder_text_index(root_str: str, _cache_serial: str = _CACHE_SERIAL) -> dict[str, str]:
+def folder_text_index(cache_version: str, root_str: str) -> dict[str, str]:
     root = Path(root_str).resolve()
     tree = build_tree(root)
     if tree is None:
@@ -54,11 +53,6 @@ def folder_text_index(root_str: str, _cache_serial: str = _CACHE_SERIAL) -> dict
         for n in iter_folder_nodes(tree)
         if n.rel != Path(".")
     }
-
-
-@st.cache_data(show_spinner=False)
-def cached_tree(root_str: str, _cache_serial: str = _CACHE_SERIAL) -> TreeNode | None:
-    return build_tree(Path(root_str).resolve())
 
 
 def _ensure_session() -> None:
@@ -149,7 +143,7 @@ def _render_keyword_inputs() -> list[str]:
 
 def _render_match_cards(root_str: str, keywords: list[str]) -> None:
     st.markdown("##### Dossiers correspondants")
-    corpus = folder_text_index(root_str)
+    corpus = folder_text_index(_CACHE_SERIAL, root_str)
     ranked = ranked_folder_matches(corpus, keywords)
 
     if not any((k or "").strip() for k in keywords):
@@ -159,7 +153,7 @@ def _render_match_cards(root_str: str, keywords: list[str]) -> None:
         st.info("Aucun dossier ne contient ces mots-clés (recherche insensible à la casse).")
         return
 
-    tree = cached_tree(root_str)
+    tree = build_tree(Path(root_str).resolve())
     key_to_node: dict[str, TreeNode] = {}
     if tree is not None:
         key_to_node = {_folder_key(n): n for n in iter_folder_nodes(tree)}
@@ -279,12 +273,12 @@ def _render_document_viewer(browse_root: Path) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Dossierkit", layout="wide")
+    st.set_page_config(page_title="Dossier Analyzer", layout="wide")
     _ensure_session()
 
-    st.title("Dossierkit")
+    st.title("Dossier Analyzer")
     st.caption("Exploration de dossiers et analyse par mots-clés.")
-    default_root = os.environ.get("DOSSIERKIT_ROOT", str(DEFAULT_DATA_ROOT))
+    default_root = os.environ.get("DOSSIER_ANALYZER_ROOT", str(DEFAULT_DATA_ROOT))
     with st.sidebar:
         st.markdown("### Racine des dossiers")
         root_input = st.text_input(
@@ -301,7 +295,7 @@ def main() -> None:
         st.stop()
 
     root_str = str(root)
-    tree = cached_tree(root_str)
+    tree = build_tree(root)
     n_dirs = count_folders(tree) if tree else 0
 
     with st.expander("Mots-clés — analyse", expanded=True):

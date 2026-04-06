@@ -6,7 +6,7 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 
-from dossierkit.scan import SUPPORTED_EXTENSIONS, TreeNode
+from dossier_analyzer.scan import SUPPORTED_EXTENSIONS, TreeNode
 
 
 def _read_pdf_text(path: Path) -> str:

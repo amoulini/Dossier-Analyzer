@@ -1,8 +1,8 @@
-# Dossierkit
+# Dossier Analyzer
 
-**Dossierkit** is a small [Streamlit](https://streamlit.io) app for working with **folders of documents** (“dossiers”): browse nested folders, open PDFs and Markdown in the browser, and **rank subfolders** by how well their text matches a list of keywords (case-insensitive substring search with weighted ordering).
+**Dossier Analyzer** is a small [Streamlit](https://streamlit.io) app for working with **folders of documents** (“dossiers”): browse nested folders, open PDFs and Markdown in the browser, and **rank subfolders** by how well their text matches a list of keywords (case-insensitive substring search with weighted ordering).
 
-The core logic lives in the `dossierkit` Python package (tree scan, text extraction, matching).
+The core logic lives in the `dossier_analyzer` Python package (tree scan, text extraction, matching).
 
 ## Features
 
@@ -43,7 +43,7 @@ Then open the URL Streamlit prints (usually [http://localhost:8501](http://local
 
 | Variable | Meaning |
 | -------- | ------- |
-| `DOSSIERKIT_ROOT` | Optional. Default folder path for dossiers. If unset, the app uses `data/dossiers` next to `app.py`. |
+| `DOSSIER_ANALYZER_ROOT` | Optional. Default folder path for dossiers. If unset, the app uses `data/dossiers` next to `app.py`. |
 
 You can also change the root anytime in the sidebar text field.
 
@@ -54,5 +54,5 @@ You can also change the root anytime in the sidebar text field.
 | Path | Role |
 | ---- | ---- |
 | `app.py` | Streamlit UI |
-| `dossierkit/` | `scan` (tree), `extract` (PDF/MD/image text), `match` (ranked keyword matches) |
+| `dossier_analyzer/` | `scan` (tree), `extract` (PDF/MD/image text), `match` (ranked keyword matches) |
 | `.streamlit/config.toml` | Streamlit theme / server options |
