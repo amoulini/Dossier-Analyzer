@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import sys
 import uuid
 from html import escape
 from pathlib import Path
@@ -157,22 +158,193 @@ def _ensure_session() -> None:
             r["positivity"] = 3
 
 
+def _running_in_docker() -> bool:
+    return Path("/.dockerenv").exists()
+
+
+def _native_file_dialog_usable() -> bool:
+    """Tk file dialog only works where the Streamlit process has a desktop (not typical in Docker)."""
+    if _running_in_docker():
+        return False
+    if sys.platform == "win32":
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _is_path_under(child: Path, base: Path) -> bool:
+    try:
+        child.resolve().relative_to(base.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _server_browse_jail() -> Path:
+    """Upper bound for in-app folder navigation (host mount in Docker is usually /data)."""
+    candidates: list[str | None] = [
+        os.environ.get("DOSSIER_ANALYZER_ROOT"),
+        "/data",
+        str(DEFAULT_DATA_ROOT.resolve()),
+    ]
+    for c in candidates:
+        if not c:
+            continue
+        p = Path(c).expanduser().resolve()
+        if p.is_dir():
+            return p
+    return Path("/").resolve()
+
+
+def _ask_directory_native() -> str | None:
+    """Boîte de dialogue dossier du système (Tk). À n’utiliser que si _native_file_dialog_usable()."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception:
+        st.warning("tkinter n’est pas disponible : saisissez le chemin ou utilisez la navigation web ci‑dessous.")
+        return None
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except tk.TclError:
+        pass
+    path = ""
+    try:
+        path = filedialog.askdirectory(parent=root, title="Choisir le dossier racine")
+    except tk.TclError as e:
+        st.warning(f"Impossible d’ouvrir la boîte de dialogue : {e}")
+    finally:
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+    if not path:
+        return None
+    return str(Path(path).resolve())
+
+
+def _render_server_folder_browser() -> None:
+    """Navigateur de dossiers dans l’interface web (chemins vus par le serveur / conteneur)."""
+    jail = _server_browse_jail()
+    if "server_browse_path" not in st.session_state:
+        st.session_state.server_browse_path = str(jail)
+    cur = Path(str(st.session_state.server_browse_path)).expanduser().resolve()
+    if not _is_path_under(cur, jail):
+        cur = jail
+        st.session_state.server_browse_path = str(jail)
+
+    st.caption(
+        "Utile sous **Docker** ou sans interface graphique : les dossiers listés sont ceux du **serveur** "
+        f"(racine autorisée : `{jail.as_posix()}`)."
+    )
+    st.markdown(f"**Dossier courant :** `{cur.as_posix()}`")
+
+    up_col, use_col, home_col = st.columns(3)
+    with up_col:
+        if cur != jail and _is_path_under(cur.parent, jail):
+            if st.button("↑ Remonter", key="srv_browse_up", use_container_width=True):
+                st.session_state.server_browse_path = str(cur.parent.resolve())
+                st.rerun()
+    with use_col:
+        if st.button(
+            "Utiliser ce dossier",
+            type="primary",
+            key="srv_browse_apply",
+            use_container_width=True,
+            help="Copie ce chemin dans le champ « Chemin du dossier racine ».",
+        ):
+            st.session_state.root_path_input = str(cur)
+            st.rerun()
+    with home_col:
+        if st.button("Racine autorisée", key="srv_browse_home", use_container_width=True):
+            st.session_state.server_browse_path = str(jail)
+            st.rerun()
+
+    try:
+        subs = sorted(
+            (p for p in cur.iterdir() if p.is_dir()),
+            key=lambda p: p.name.lower(),
+        )
+    except PermissionError:
+        st.error("Permission refusée pour lire ce dossier.")
+        subs = []
+
+    if not subs:
+        st.caption("Aucun sous-dossier ici.")
+        return
+
+    st.caption("Sous-dossiers — cliquer pour entrer :")
+    with st.container(height=280, border=True):
+        ncols = 3
+        for row_start in range(0, len(subs), ncols):
+            chunk = subs[row_start : row_start + ncols]
+            cols = st.columns(ncols, gap="small")
+            for j, p in enumerate(chunk):
+                with cols[j]:
+                    bkey = f"sd_{hashlib.sha256(str(p).encode()).hexdigest()[:18]}"
+                    if st.button(p.name, key=bkey, use_container_width=True):
+                        st.session_state.server_browse_path = str(p.resolve())
+                        st.rerun()
+
+
 def _render_workspace_picker(*, example_path: str) -> None:
     """Premier écran : choisir explicitement le dossier racine avant le reste de l’application."""
     if "root_path_input" not in st.session_state:
         st.session_state.root_path_input = os.environ.get("DOSSIER_ANALYZER_ROOT", "")
 
+    use_tk = _native_file_dialog_usable()
     st.title("Dossier Analyzer")
+    if use_tk:
+        path_hint = (
+            "Vous pouvez utiliser **Parcourir** (explorateur du système), la **navigation web** ci‑dessous "
+            "(chemins du serveur), ou la saisie directe."
+        )
+    else:
+        path_hint = (
+            "Utilisez surtout la **navigation web** ci‑dessous : les dossiers sont ceux du **conteneur ou du serveur** "
+            "(ex. volume Docker sous `/data`). Vous pouvez aussi coller un chemin absolu."
+        )
     st.markdown(
         "Bienvenue. **Indiquez le dossier racine** contenant les dossiers à explorer et à analyser, "
-        "puis cliquez sur **Ouvrir ce dossier**."
+        "puis cliquez sur **Ouvrir ce dossier**. " + path_hint
     )
     st.caption(f"Exemple de chemin : `{example_path}`")
-    st.text_input(
-        "Chemin du dossier racine",
-        key="root_path_input",
-        placeholder="Collez le chemin absolu du dossier…",
-    )
+
+    with st.expander(
+        "Parcourir les dossiers sur le serveur (Docker, SSH, etc.)",
+        expanded=not use_tk,
+    ):
+        _render_server_folder_browser()
+
+    st.markdown("##### Chemin du dossier racine")
+    if use_tk:
+        col_in, col_br = st.columns([4, 1], vertical_alignment="bottom")
+        with col_in:
+            st.text_input(
+                "Chemin",
+                key="root_path_input",
+                label_visibility="collapsed",
+                placeholder="Collez le chemin absolu du dossier…",
+            )
+        with col_br:
+            if st.button(
+                "Parcourir",
+                use_container_width=True,
+                help="Explorateur du système sur l’ordinateur où tourne Streamlit (pas disponible dans Docker).",
+            ):
+                picked = _ask_directory_native()
+                if picked:
+                    st.session_state.root_path_input = picked
+                    st.rerun()
+    else:
+        st.text_input(
+            "Chemin",
+            key="root_path_input",
+            label_visibility="collapsed",
+            placeholder="Collez le chemin absolu du dossier…",
+        )
     raw = str(st.session_state.get("root_path_input", "") or "").strip()
     cand = Path(raw).expanduser().resolve() if raw else None
     if st.button("Ouvrir ce dossier", type="primary"):
@@ -492,6 +664,7 @@ def main() -> None:
             st.session_state.browse_root = None
             st.session_state.selected_file = None
             st.session_state.pop("root_path_input", None)
+            st.session_state.pop("server_browse_path", None)
             st.rerun()
 
     if not root.is_dir():
