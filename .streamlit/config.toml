@@ -1,22 +1,24 @@
-# Theme: warm paper + green accent (readable for long document sessions)
+# Theme: warm paper + teal accent (readable for long document sessions)
 # Restart the app after changing this file.
 
 [theme]
 base = "light"
 
-# Primary — selected row, main actions, focus ring (clear green, still legible with white label text)
-primaryColor = "#15803d"
+# Primary — selected row, main actions, focus ring (#0f766e)
+primaryColor = "rgb(15, 118, 110)"
 
-# Main canvas (warm off-white)
-backgroundColor = "#faf7f2"
+# Main canvas (warm off-white) (#faf7f2)
+backgroundColor = "rgb(250, 247, 242)"
 
-# Sidebar, cards, secondary buttons feel softer than pure white
-secondaryBackgroundColor = "#ede8df"
+# Sidebar, cards, secondary buttons feel softer than pure white (#ede8df)
+secondaryBackgroundColor = "rgb(237, 232, 223)"
 
-# Body text (warm slate, not pure black)
-textColor = "#334155"
+# Body text (warm slate, not pure black) (#334155)
+textColor = "rgb(51, 65, 85)"
 
-# Links and inline accents harmonize with primary
-linkColor = "#16a34a"
+# Links and inline accents harmonize with primary (#0d9488)
+linkColor = "rgb(13, 148, 136)"
+
+excelColor = "rgb(33, 115, 70)"
 
 font = "sans serif"

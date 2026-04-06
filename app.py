@@ -29,6 +29,25 @@ DEFAULT_DATA_ROOT = Path(__file__).resolve().parent / "data" / "dossiers"
 # Pass as first arg to folder_text_index so Streamlit cache keys never match stale disk entries.
 _CACHE_SERIAL = "dossier-analyzer-3"
 
+# Microsoft Excel product green (#217346); applied via CSS to the sole st.download_button in this app.
+_EXCEL_EXPORT_BTN_CSS = """
+<style>
+    div[data-testid="stDownloadButton"] button {
+        background-color: rgb(33, 115, 70) !important;
+        border: 1px solid rgb(27, 95, 59) !important;
+        color: rgb(255, 255, 255) !important;
+    }
+    div[data-testid="stDownloadButton"] button:hover {
+        background-color: rgb(27, 95, 59) !important;
+        border-color: rgb(22, 80, 50) !important;
+        color: rgb(255, 255, 255) !important;
+    }
+    div[data-testid="stDownloadButton"] button:focus-visible {
+        box-shadow: rgb(255, 255, 255) 0px 0px 0px 2px, rgb(33, 115, 70) 0px 0px 0px 4px !important;
+    }
+</style>
+"""
+
 
 def _safe_widget_key(path_str: str, prefix: str) -> str:
     h = hashlib.sha256(path_str.encode()).hexdigest()[:24]
@@ -82,7 +101,7 @@ def _ensure_session() -> None:
         st.session_state.kw_rows = [
             {"id": "init-1", "text": "Excellent niveau"},
             {"id": "init-2", "text": "Bon niveau"},
-            {"id": "init-3", "text": ""},
+            {"id": "init-3", "text": "Irrégulier"},
         ]
 
 
@@ -171,6 +190,9 @@ def _render_match_cards(root_str: str, keywords: list[str]) -> None:
     corpus = folder_text_index(_CACHE_SERIAL, root_str)
     ranked = ranked_folder_matches(corpus, keywords)
 
+    if ranked:
+        st.markdown(_EXCEL_EXPORT_BTN_CSS, unsafe_allow_html=True)
+
     head_l, head_r = st.columns([4, 1])
     with head_l:
         st.markdown("##### Dossiers correspondants")
@@ -181,7 +203,7 @@ def _render_match_cards(root_str: str, keywords: list[str]) -> None:
                 data=_matches_to_excel_bytes(ranked, kws_norm),
                 file_name="dossier_analyzer_matches.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
+                type="secondary",
                 width="stretch",
                 key="export_matches_xlsx",
             )
