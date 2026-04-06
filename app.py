@@ -13,10 +13,16 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 import streamlit as st
+from openpyxl import Workbook
 
 from dossier_analyzer.extract import aggregate_folder_text
-from dossier_analyzer.match import ranked_folder_matches
-from dossier_analyzer.scan import TreeNode, build_tree, count_folders, iter_folder_nodes
+from dossier_analyzer.match import RankedFolderMatch, normalize_keywords, ranked_folder_matches
+from dossier_analyzer.scan import (
+    TreeNode,
+    build_tree,
+    count_leaf_folders,
+    iter_folder_nodes,
+)
 
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parent / "data" / "dossiers"
 
@@ -39,6 +45,20 @@ def _folder_label(node: TreeNode) -> str:
     if node.rel == Path("."):
         return node.name
     return node.rel.as_posix()
+
+
+def _matches_to_excel_bytes(ranked: list[RankedFolderMatch], column_keywords: list[str]) -> bytes:
+    """One sheet: dossier path (relative) × keyword occurrence counts."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Analyse"
+    ws.append(["Dossier", *column_keywords])
+    for row in ranked:
+        hits = dict(row.keyword_hits)
+        ws.append([row.folder_key] + [hits.get(kw, 0) for kw in column_keywords])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 @st.cache_data(show_spinner="Indexation des dossiers…")
@@ -142,13 +162,30 @@ def _render_keyword_inputs() -> list[str]:
 
 
 def _render_match_cards(root_str: str, keywords: list[str]) -> None:
-    st.markdown("##### Dossiers correspondants")
+    kws_norm = normalize_keywords(keywords)
+    if not kws_norm:
+        st.markdown("##### Dossiers correspondants")
+        st.caption("Entrez au moins un mot-clé non vide ci-dessus.")
+        return
+
     corpus = folder_text_index(_CACHE_SERIAL, root_str)
     ranked = ranked_folder_matches(corpus, keywords)
 
-    if not any((k or "").strip() for k in keywords):
-        st.caption("Entrez au moins un mot-clé non vide ci-dessus.")
-        return
+    head_l, head_r = st.columns([4, 1])
+    with head_l:
+        st.markdown("##### Dossiers correspondants")
+    with head_r:
+        if ranked:
+            st.download_button(
+                "Export to Excel",
+                data=_matches_to_excel_bytes(ranked, kws_norm),
+                file_name="dossier_analyzer_matches.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                width="stretch",
+                key="export_matches_xlsx",
+            )
+
     if not ranked:
         st.info("Aucun dossier ne contient ces mots-clés (recherche insensible à la casse).")
         return
@@ -296,7 +333,7 @@ def main() -> None:
 
     root_str = str(root)
     tree = build_tree(root)
-    n_dirs = count_folders(tree) if tree else 0
+    n_final = count_leaf_folders(tree) if tree else 0
 
     with st.expander("Mots-clés — analyse", expanded=True):
         kw_list = _render_keyword_inputs()
@@ -313,7 +350,7 @@ def main() -> None:
                 st.caption("Développez les dossiers et cliquez sur un document.")
                 with st.container(height=520, border=True):
                     _render_file_tree(tree)
-            st.caption(f"**{n_dirs}** dossiers indexés")
+            st.caption(f"**{n_final}** dossiers finaux indexés")
         with right:
             _render_document_viewer(root)
 

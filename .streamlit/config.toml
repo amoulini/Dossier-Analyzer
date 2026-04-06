@@ -1,11 +1,11 @@
-# Theme: warm paper + teal accent (readable for long document sessions)
+# Theme: warm paper + green accent (readable for long document sessions)
 # Restart the app after changing this file.
 
 [theme]
 base = "light"
 
-# Primary — selected row, main actions, focus ring
-primaryColor = "#0f766e"
+# Primary — selected row, main actions, focus ring (clear green, still legible with white label text)
+primaryColor = "#15803d"
 
 # Main canvas (warm off-white)
 backgroundColor = "#faf7f2"
@@ -17,6 +17,6 @@ secondaryBackgroundColor = "#ede8df"
 textColor = "#334155"
 
 # Links and inline accents harmonize with primary
-linkColor = "#0d9488"
+linkColor = "#16a34a"
 
 font = "sans serif"
