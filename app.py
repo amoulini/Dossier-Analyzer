@@ -17,7 +17,7 @@ import fitz  # PyMuPDF
 import streamlit as st
 from openpyxl import Workbook
 
-from dossier_analyzer.extract import aggregate_folder_text
+from dossier_analyzer.extract import collect_all_file_paths, extract_text_for_path
 from dossier_analyzer.match import (
     KeywordEntry,
     RankedFolderMatch,
@@ -25,15 +25,14 @@ from dossier_analyzer.match import (
     ranked_folder_matches,
 )
 from dossier_analyzer.scan import (
+    SUPPORTED_EXTENSIONS,
     TreeNode,
     build_tree,
     count_leaf_folders,
-    iter_folder_nodes,
-    iter_leaf_folder_nodes,
 )
 
-# Pass as first arg to folder_text_index so Streamlit cache keys never match stale disk entries.
-_CACHE_SERIAL = "dossier-analyzer-4"
+# Pass as first arg to file_text_index so Streamlit cache keys never match stale disk entries.
+_CACHE_SERIAL = "dossier-analyzer-5"
 
 # Microsoft Excel product green (#217346); applied via CSS to the sole st.download_button in this app.
 _EXCEL_EXPORT_BTN_CSS = """
@@ -58,12 +57,6 @@ _EXCEL_EXPORT_BTN_CSS = """
 def _safe_widget_key(path_str: str, prefix: str) -> str:
     h = hashlib.sha256(path_str.encode()).hexdigest()[:24]
     return f"{prefix}_{h}"
-
-
-def _folder_key(node: TreeNode) -> str:
-    if node.rel == Path("."):
-        return "."
-    return node.rel.as_posix()
 
 
 # Une couleur de fond distincte par note (0 → 5), progression chromatique rouge → vert.
@@ -91,7 +84,7 @@ def _positivity_chip_colors(grade: int) -> tuple[str, str]:
 
 
 def _empty_ranked_row(folder_key: str) -> RankedFolderMatch:
-    """Placeholder row for a leaf dossier with no keyword hits."""
+    """Placeholder row for a file path with no keyword hits."""
     return RankedFolderMatch(
         folder_key=folder_key,
         keyword_hits=(),
@@ -103,12 +96,12 @@ def _empty_ranked_row(folder_key: str) -> RankedFolderMatch:
 
 
 def _matches_to_excel_bytes(ranked: list[RankedFolderMatch], columns: list[KeywordEntry]) -> bytes:
-    """Sheet 'Analyse': dossiers × counts; sheet 'Mots-clés': keyword ↔ grade (sorted by grade ↓)."""
+    """Sheet 'Analyse': fichiers × counts; sheet 'Mots-clés': keyword ↔ grade (sorted by grade ↓)."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Analyse"
     headers = [e.text for e in columns]
-    ws.append(["Dossier", *headers])
+    ws.append(["Fichier", *headers])
     ws.append(["Positivité (0–5)", *[str(e.positivity) for e in columns]])
     for row in ranked:
         hits = dict(row.keyword_hits)
@@ -124,21 +117,20 @@ def _matches_to_excel_bytes(ranked: list[RankedFolderMatch], columns: list[Keywo
     return buf.getvalue()
 
 
-@st.cache_data(show_spinner="Indexation des dossiers…")
-def folder_text_index(
-    cache_version: str,
-    root_str: str,
-    leaves_only: bool,
-) -> dict[str, str]:
+@st.cache_data(show_spinner="Indexation des fichiers…")
+def file_text_index(cache_version: str, root_str: str) -> dict[str, str]:
+    """Chemin relatif (posix) → texte extrait pour chaque fichier pris en charge sous la racine."""
     root = Path(root_str).resolve()
     tree = build_tree(root)
     if tree is None:
         return {}
-    if leaves_only:
-        nodes = iter_leaf_folder_nodes(tree)
-    else:
-        nodes = [n for n in iter_folder_nodes(tree) if n.rel != Path(".")]
-    return {_folder_key(n): aggregate_folder_text(n) for n in nodes}
+    corpus: dict[str, str] = {}
+    for fpath in collect_all_file_paths(tree):
+        if fpath.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            continue
+        rel = fpath.relative_to(root).as_posix()
+        corpus[rel] = extract_text_for_path(fpath)
+    return corpus
 
 
 def _ensure_session() -> None:
@@ -363,7 +355,7 @@ def _make_persist_positivity(row_id: str):
 def _render_keyword_inputs() -> list[KeywordEntry]:
     st.caption(
         "Saisie dynamique : barre rouge à gauche. "
-        "Recherche insensible à la casse, sous-chaîne dans tout le texte du dossier. "
+        "Recherche insensible à la casse, sous-chaîne dans le texte de chaque fichier (PDF, Markdown, nom pour les images). "
         "Tri Analyse : le curseur Positif (0–5) pondère le classement (0 = pas positif, 5 = très positif). "
         "Ces champs restent en place lorsque vous passez à l’onglet Dossiers."
     )
@@ -394,7 +386,7 @@ def _render_keyword_inputs() -> list[KeywordEntry]:
                 max_value=5,
                 step=1,
                 key=f"kw_pos_{row['id']}",
-                help="0 = pas positif … 5 = très positif — utilisé pour trier les dossiers",
+                help="0 = pas positif … 5 = très positif — utilisé pour trier les fichiers correspondants",
                 label_visibility="collapsed",
                 on_change=_make_persist_positivity(row["id"]),
             )
@@ -441,21 +433,21 @@ def _render_keyword_inputs() -> list[KeywordEntry]:
 def _render_match_cards(root_str: str, entries: list[KeywordEntry]) -> None:
     kws_norm = normalize_keyword_entries(entries)
     if not kws_norm:
-        st.markdown("##### Dossiers correspondants")
+        st.markdown("##### Fichiers correspondants")
         st.caption("Entrez au moins un mot-clé non vide ci-dessus.")
         return
 
-    corpus = folder_text_index(_CACHE_SERIAL, root_str, True)
+    corpus = file_text_index(_CACHE_SERIAL, root_str)
     ranked = ranked_folder_matches(corpus, entries)
 
     head_l, head_c, head_r = st.columns([2.8, 2.2, 1], vertical_alignment="center")
     with head_l:
-        st.markdown("##### Dossiers correspondants")
+        st.markdown("##### Fichiers correspondants")
     with head_c:
         add_unmatched = st.checkbox(
-            "Ajouter les dossiers sans correspondance",
-            help="Inclure tous les dossiers finaux, même ceux sans aucune correspondance aux mots-clés (valeurs à zéro dans l’export).",
-            key="add_unmatched_leaf_dossiers",
+            "Ajouter les fichiers sans correspondance",
+            help="Inclure tous les fichiers indexés, même ceux sans aucune correspondance aux mots-clés (valeurs à zéro dans l’export).",
+            key="add_unmatched_files",
         )
 
     matched_keys = {r.folder_key for r in ranked}
@@ -474,7 +466,7 @@ def _render_match_cards(root_str: str, entries: list[KeywordEntry]) -> None:
             st.download_button(
                 "Exporter vers Excel",
                 data=_matches_to_excel_bytes(display_rows, kws_norm),
-                file_name="analyse_dossiers.xlsx",
+                file_name="analyse_fichiers.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="secondary",
                 width="stretch",
@@ -483,9 +475,9 @@ def _render_match_cards(root_str: str, entries: list[KeywordEntry]) -> None:
 
     if not display_rows:
         if not corpus:
-            st.info("Aucun dossier final à analyser sous cette racine.")
+            st.info("Aucun fichier indexé sous cette racine (PDF, Markdown, images prises en charge).")
         else:
-            st.info("Aucun dossier ne contient ces mots-clés (recherche insensible à la casse).")
+            st.info("Aucun fichier ne contient ces mots-clés (recherche insensible à la casse).")
         return
 
     pos_by_kw = {e.text: e.positivity for e in kws_norm}

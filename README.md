@@ -1,6 +1,6 @@
 # Dossier Analyzer
 
-**Dossier Analyzer** is a small [Streamlit](https://streamlit.io) app for working with **folders of documents** (“dossiers”): browse nested folders, open PDFs and Markdown in the browser, and **rank subfolders** by how well their text matches a list of keywords (case-insensitive substring search with weighted ordering).
+**Dossier Analyzer** is a small [Streamlit](https://streamlit.io) app for working with **folders of documents** (“dossiers”): browse nested folders, open PDFs and Markdown in the browser, and **rank files** by how well their text matches a list of keywords (case-insensitive substring search with weighted ordering).
 
 The core logic lives in the `dossier_analyzer` Python package (tree scan, text extraction, matching).
 
@@ -8,7 +8,7 @@ The core logic lives in the `dossier_analyzer` Python package (tree scan, text e
 
 - **Explorer** — Expandable tree of folders; click a file to preview it.
 - **Previews** — PDF (rendered pages), Markdown, common image types; other files are listed but not previewed.
-- **Analysis** — Dynamic keyword rows; results show matching subfolders with hit counts and ranking (total hits, distinct keywords, weight of keywords by order).
+- **Analysis** — Dynamic keyword rows; results list matching **files** (not folders) with hit counts and ranking (total hits, distinct keywords, weight of keywords by order).
 
 ## Requirements
 

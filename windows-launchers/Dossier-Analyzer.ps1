@@ -1,4 +1,4 @@
-$folder = "path to the folder"
+$folder = "C:\Users\mouli\Documents\Projects\Dossier-Analyzer"
 
 if (Test-Path $folder) {
     Set-Location $folder
