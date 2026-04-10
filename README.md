@@ -39,15 +39,26 @@ uv run streamlit run app.py
 
 Then open the URL Streamlit prints (usually [http://localhost:8501](http://localhost:8501)).
 
+### Windows launchers
+
+In [`windows-launchers/`](windows-launchers/):
+
+| File | Role |
+| ---- | ---- |
+| [`Dossier-Analyzer.bat`](windows-launchers/Dossier-Analyzer.bat) | Double‑click launcher: runs embedded PowerShell to `git pull`, `uv sync`, and start Streamlit. |
+| [`Dossier-Analyzer.ps1`](windows-launchers/Dossier-Analyzer.ps1) | Same flow as a `.ps1` script you can run from PowerShell. |
+
+**Setup:** Edit the **`$folder`** path in each script so it matches **your** clone of this repository (absolute path to the project root). **Git** and [**uv**](https://docs.astral.sh/uv/) must be installed and available on your `PATH`.
+
 ## Configuration
 
 | Variable | Meaning |
 | -------- | ------- |
-| `DOSSIER_ANALYZER_ROOT` | Optional. Default folder path for dossiers. If unset, the app uses `data/dossiers` next to `app.py`. |
+| `DOSSIER_ANALYZER_ROOT` | Optional. Default folder path shown when you first open the app. If unset, the app uses your user home directory. |
 
-You can also change the root anytime in the sidebar text field.
+You can change the working folder from the first screen (folder browser) or later via **Changer de dossier** in the sidebar.
 
-**Note:** In this repo, `data/` may be gitignored. Point the app at any directory on disk that contains your dossier layout.
+**Note:** Point the app at any directory on disk that contains your dossier layout.
 
 ## Project layout
 
@@ -55,4 +66,5 @@ You can also change the root anytime in the sidebar text field.
 | ---- | ---- |
 | `app.py` | Streamlit UI |
 | `dossier_analyzer/` | `scan` (tree), `extract` (PDF/MD/image text), `match` (ranked keyword matches) |
+| `windows-launchers/` | Optional Windows `.bat` / `.ps1` helpers to pull, sync, and run the app |
 | `.streamlit/config.toml` | Streamlit theme / server options |

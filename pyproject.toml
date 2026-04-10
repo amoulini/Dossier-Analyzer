@@ -1,6 +1,6 @@
 [project]
 name = "dossier-analyzer"
-version = "0.1.0"
+version = "1.0.1"
 description = "Dossier Analyzer — explore document dossiers, preview files, and rank folders by keyword matches."
 readme = "README.md"
 requires-python = ">=3.13"
