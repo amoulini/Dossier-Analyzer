@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import stat
 import sys
 import uuid
 from html import escape
@@ -30,8 +31,6 @@ from dossier_analyzer.scan import (
     iter_folder_nodes,
     iter_leaf_folder_nodes,
 )
-
-DEFAULT_DATA_ROOT = Path(__file__).resolve().parent / "data" / "dossiers"
 
 # Pass as first arg to folder_text_index so Streamlit cache keys never match stale disk entries.
 _CACHE_SERIAL = "dossier-analyzer-4"
@@ -158,14 +157,8 @@ def _ensure_session() -> None:
             r["positivity"] = 3
 
 
-def _running_in_docker() -> bool:
-    return Path("/.dockerenv").exists()
-
-
 def _native_file_dialog_usable() -> bool:
-    """Tk file dialog only works where the Streamlit process has a desktop (not typical in Docker)."""
-    if _running_in_docker():
-        return False
+    """Tk file dialog only works where the Streamlit process has a desktop."""
     if sys.platform == "win32":
         return True
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
@@ -179,92 +172,105 @@ def _is_path_under(child: Path, base: Path) -> bool:
         return False
 
 
-def _server_browse_jail() -> Path:
-    """Upper bound for in-app folder navigation (host mount in Docker is usually /data)."""
-    candidates: list[str | None] = [
-        os.environ.get("DOSSIER_ANALYZER_ROOT"),
-        "/data",
-        str(DEFAULT_DATA_ROOT.resolve()),
-    ]
-    for c in candidates:
-        if not c:
-            continue
-        p = Path(c).expanduser().resolve()
-        if p.is_dir():
-            return p
+def _user_home_path() -> Path:
+    """Dossier utilisateur : ~ sous Linux/macOS, profil utilisateur sous Windows (%USERPROFILE%)."""
+    return Path.home().resolve()
+
+
+def _default_workspace_path_str() -> str:
+    """Chemin par défaut pour le dossier racine : variable d’environnement ou dossier utilisateur."""
+    env_root = (os.environ.get("DOSSIER_ANALYZER_ROOT") or "").strip()
+    if env_root:
+        return env_root
+    return str(_user_home_path())
+
+
+def _filesystem_browse_top() -> Path:
+    """Racine haute du navigateur : `/` sous Linux/macOS, racine du lecteur (ex. `C:\\`) sous Windows."""
+    if sys.platform == "win32":
+        home = _user_home_path()
+        anch = home.anchor
+        if anch and anch != "\\":
+            root = Path(anch)
+            if root.exists():
+                return root.resolve()
+        return home
     return Path("/").resolve()
 
 
-def _ask_directory_native() -> str | None:
-    """Boîte de dialogue dossier du système (Tk). À n’utiliser que si _native_file_dialog_usable()."""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-    except Exception:
-        st.warning("tkinter n’est pas disponible : saisissez le chemin ou utilisez la navigation web ci‑dessous.")
-        return None
+def _normalize_workspace_root_path() -> Path:
+    """Garde `root_path_input` comme chemin dossier valide sous la racine disque ; renvoie le Path résolu."""
+    top = _filesystem_browse_top()
+    home = _user_home_path()
+    raw = str(st.session_state.get("root_path_input", "") or "").strip()
+    if not raw:
+        cur = home if home.is_dir() else top
+        st.session_state.root_path_input = str(cur)
+        return cur.resolve()
+    cur = Path(raw).expanduser().resolve()
+    if not _is_path_under(cur, top):
+        cur = top
+        st.session_state.root_path_input = str(cur)
+        return cur.resolve()
+    if not cur.is_dir():
+        cur = home if home.is_dir() else top
+        st.session_state.root_path_input = str(cur)
+        return cur.resolve()
+    st.session_state.root_path_input = str(cur)
+    return cur.resolve()
 
-    root = tk.Tk()
-    root.withdraw()
+
+def _should_hide_folder_in_browser(p: Path) -> bool:
+    """Masque les dossiers cachés et ceux dont le nom commence par un point."""
+    if not p.is_dir():
+        return True
+    if p.name.startswith("."):
+        return True
     try:
-        root.attributes("-topmost", True)
-    except tk.TclError:
-        pass
-    path = ""
-    try:
-        path = filedialog.askdirectory(parent=root, title="Choisir le dossier racine")
-    except tk.TclError as e:
-        st.warning(f"Impossible d’ouvrir la boîte de dialogue : {e}")
-    finally:
-        try:
-            root.destroy()
-        except tk.TclError:
-            pass
-    if not path:
-        return None
-    return str(Path(path).resolve())
+        st_info = p.stat()
+    except OSError:
+        return True
+    if sys.platform == "win32" and hasattr(st_info, "st_file_attributes"):
+        if st_info.st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN:
+            return True
+    return False
 
 
 def _render_server_folder_browser() -> None:
-    """Navigateur de dossiers dans l’interface web (chemins vus par le serveur / conteneur)."""
-    jail = _server_browse_jail()
-    if "server_browse_path" not in st.session_state:
-        st.session_state.server_browse_path = str(jail)
-    cur = Path(str(st.session_state.server_browse_path)).expanduser().resolve()
-    if not _is_path_under(cur, jail):
-        cur = jail
-        st.session_state.server_browse_path = str(jail)
+    """Navigateur de dossiers : met à jour `root_path_input` (seule source pour le dossier choisi)."""
+    top = _filesystem_browse_top()
+    cur = _normalize_workspace_root_path()
 
     st.caption(
-        "Utile sous **Docker** ou sans interface graphique : les dossiers listés sont ceux du **serveur** "
-        f"(racine autorisée : `{jail.as_posix()}`)."
+        "Navigation locale : vous ne pouvez pas remonter au‑dessus de la racine du disque "
+        f"(`{top.as_posix()}`)."
     )
-    st.markdown(f"**Dossier courant :** `{cur.as_posix()}`")
 
-    up_col, use_col, home_col = st.columns(3)
+    home = _user_home_path()
+    up_col, home_col, root_col = st.columns(3)
     with up_col:
-        if cur != jail and _is_path_under(cur.parent, jail):
+        if cur != top and _is_path_under(cur.parent, top):
             if st.button("↑ Remonter", key="srv_browse_up", use_container_width=True):
-                st.session_state.server_browse_path = str(cur.parent.resolve())
+                st.session_state.root_path_input = str(cur.parent.resolve())
                 st.rerun()
-    with use_col:
-        if st.button(
-            "Utiliser ce dossier",
-            type="primary",
-            key="srv_browse_apply",
-            use_container_width=True,
-            help="Copie ce chemin dans le champ « Chemin du dossier racine ».",
-        ):
-            st.session_state.root_path_input = str(cur)
-            st.rerun()
     with home_col:
-        if st.button("Racine autorisée", key="srv_browse_home", use_container_width=True):
-            st.session_state.server_browse_path = str(jail)
+        if st.button(
+            "Dossier utilisateur",
+            key="srv_browse_home",
+            use_container_width=True,
+            help="Linux / macOS : ~ / $HOME ; Windows : profil utilisateur.",
+        ):
+            st.session_state.root_path_input = str(home if home.is_dir() else top)
             st.rerun()
+    with root_col:
+        if cur != top:
+            if st.button("Racine du disque", key="srv_browse_root", use_container_width=True):
+                st.session_state.root_path_input = str(top)
+                st.rerun()
 
     try:
         subs = sorted(
-            (p for p in cur.iterdir() if p.is_dir()),
+            (p for p in cur.iterdir() if not _should_hide_folder_in_browser(p)),
             key=lambda p: p.name.lower(),
         )
     except PermissionError:
@@ -285,75 +291,37 @@ def _render_server_folder_browser() -> None:
                 with cols[j]:
                     bkey = f"sd_{hashlib.sha256(str(p).encode()).hexdigest()[:18]}"
                     if st.button(p.name, key=bkey, use_container_width=True):
-                        st.session_state.server_browse_path = str(p.resolve())
+                        st.session_state.root_path_input = str(p.resolve())
                         st.rerun()
 
 
-def _render_workspace_picker(*, example_path: str) -> None:
+def _render_workspace_picker() -> None:
     """Premier écran : choisir explicitement le dossier racine avant le reste de l’application."""
     if "root_path_input" not in st.session_state:
-        st.session_state.root_path_input = os.environ.get("DOSSIER_ANALYZER_ROOT", "")
+        st.session_state.root_path_input = _default_workspace_path_str()
+    cur = _normalize_workspace_root_path()
 
     use_tk = _native_file_dialog_usable()
     st.title("Dossier Analyzer")
-    if use_tk:
-        path_hint = (
-            "Vous pouvez utiliser **Parcourir** (explorateur du système), la **navigation web** ci‑dessous "
-            "(chemins du serveur), ou la saisie directe."
-        )
-    else:
-        path_hint = (
-            "Utilisez surtout la **navigation web** ci‑dessous : les dossiers sont ceux du **conteneur ou du serveur** "
-            "(ex. volume Docker sous `/data`). Vous pouvez aussi coller un chemin absolu."
-        )
     st.markdown(
-        "Bienvenue. **Indiquez le dossier racine** contenant les dossiers à explorer et à analyser, "
-        "puis cliquez sur **Ouvrir ce dossier**. " + path_hint
+        "Bienvenue. **Choisissez le dossier racine** uniquement via **Parcourir les dossiers sur cette machine** "
+        "ci‑dessous, puis cliquez sur **Ouvrir ce dossier**."
     )
-    st.caption(f"Exemple de chemin : `{example_path}`")
+
+    st.markdown("##### Chemin du dossier racine")
+    st.code(str(cur), language=None)
 
     with st.expander(
-        "Parcourir les dossiers sur le serveur (Docker, SSH, etc.)",
+        "Parcourir les dossiers sur cette machine",
         expanded=not use_tk,
     ):
         _render_server_folder_browser()
 
-    st.markdown("##### Chemin du dossier racine")
-    if use_tk:
-        col_in, col_br = st.columns([4, 1], vertical_alignment="bottom")
-        with col_in:
-            st.text_input(
-                "Chemin",
-                key="root_path_input",
-                label_visibility="collapsed",
-                placeholder="Collez le chemin absolu du dossier…",
-            )
-        with col_br:
-            if st.button(
-                "Parcourir",
-                use_container_width=True,
-                help="Explorateur du système sur l’ordinateur où tourne Streamlit (pas disponible dans Docker).",
-            ):
-                picked = _ask_directory_native()
-                if picked:
-                    st.session_state.root_path_input = picked
-                    st.rerun()
-    else:
-        st.text_input(
-            "Chemin",
-            key="root_path_input",
-            label_visibility="collapsed",
-            placeholder="Collez le chemin absolu du dossier…",
-        )
-    raw = str(st.session_state.get("root_path_input", "") or "").strip()
-    cand = Path(raw).expanduser().resolve() if raw else None
     if st.button("Ouvrir ce dossier", type="primary"):
-        if cand is not None and cand.is_dir():
-            st.session_state.browse_root = str(cand)
+        if cur.is_dir():
+            st.session_state.browse_root = str(cur)
             st.session_state.selected_file = None
             st.rerun()
-        elif raw == "":
-            st.warning("Saisissez un chemin vers un dossier existant.")
         else:
             st.error("Ce chemin n’est pas un dossier valide.")
 
@@ -648,9 +616,8 @@ def main() -> None:
     st.set_page_config(page_title="Dossier Analyzer", layout="wide")
     _ensure_session()
 
-    example_path = os.environ.get("DOSSIER_ANALYZER_ROOT") or str(DEFAULT_DATA_ROOT.resolve())
     if st.session_state.browse_root is None:
-        _render_workspace_picker(example_path=example_path)
+        _render_workspace_picker()
         st.stop()
 
     root = Path(st.session_state.browse_root).resolve()
@@ -664,7 +631,6 @@ def main() -> None:
             st.session_state.browse_root = None
             st.session_state.selected_file = None
             st.session_state.pop("root_path_input", None)
-            st.session_state.pop("server_browse_path", None)
             st.rerun()
 
     if not root.is_dir():
