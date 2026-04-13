@@ -4,6 +4,7 @@ Dossier Analyzer — Streamlit app: dossier exploration (tree + viewer) and keyw
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import io
 import os
@@ -316,6 +317,67 @@ def _render_workspace_picker() -> None:
             st.rerun()
         else:
             st.error("Ce chemin n’est pas un dossier valide.")
+
+
+def _apply_keywords_csv_to_session(raw: bytes) -> tuple[bool, str]:
+    """Remplace les mots-clés par le contenu d’un CSV type data/keywords.csv (mot, note 0–5)."""
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return False, "Encodage non reconnu : utilisez UTF-8."
+
+    f = io.StringIO(text)
+    reader = csv.DictReader(f)
+    if reader.fieldnames is None:
+        return False, "Fichier CSV vide ou sans en-tête."
+
+    cols = [c.strip() for c in reader.fieldnames if c and str(c).strip()]
+    if not cols:
+        return False, "Aucune colonne dans le CSV."
+
+    lower_map = {c.lower(): c for c in cols}
+    word_col: str | None = None
+    for cand in ("word", "keyword", "mot", "mot-clé", "mot_cle", "texte"):
+        if cand in lower_map:
+            word_col = lower_map[cand]
+            break
+    if word_col is None:
+        word_col = cols[0]
+
+    grade_col: str | None = None
+    for cand in ("grade", "positivity", "positif", "note", "niveau"):
+        if cand in lower_map:
+            grade_col = lower_map[cand]
+            break
+    if grade_col is None:
+        grade_col = cols[1] if len(cols) >= 2 else None
+    if grade_col is None:
+        return False, "Deux colonnes attendues : mot-clé et note (0–5)."
+
+    new_rows: list[dict] = []
+    for row in reader:
+        w = str(row.get(word_col, "") or "").strip()
+        if not w:
+            continue
+        raw_g = str(row.get(grade_col, "") or "").strip().replace(",", ".")
+        try:
+            g = int(float(raw_g)) if raw_g else 3
+        except ValueError:
+            g = 3
+        g = max(0, min(5, g))
+        new_rows.append({"id": uuid.uuid4().hex[:10], "text": w, "positivity": g})
+
+    if not new_rows:
+        return False, "Aucune ligne de mot-clé valide."
+
+    for r in st.session_state.kw_rows:
+        rid = r["id"]
+        st.session_state.pop(f"kw_{rid}", None)
+        st.session_state.pop(f"kw_pos_{rid}", None)
+        st.session_state.pop(f"del_{rid}", None)
+
+    st.session_state.kw_rows = new_rows
+    return True, f"{len(new_rows)} mot(s)-clé chargé(s)."
 
 
 def _init_kw_row_widgets() -> None:
@@ -633,8 +695,30 @@ def main() -> None:
     tree = build_tree(root)
     n_final = count_leaf_folders(tree) if tree else 0
 
-    with st.expander("Mots-clés — analyse", expanded=True):
-        kw_entries = _render_keyword_inputs()
+    col_kw, col_csv = st.columns([5, 1.2], vertical_alignment="top")
+    with col_csv:
+        st.markdown("<div style='height:0.25rem'></div>", unsafe_allow_html=True)
+        uploaded_kw_csv = st.file_uploader(
+            "Charger CSV",
+            type=["csv"],
+            key="kw_csv_uploader",
+            help="Même format que data/keywords.csv : colonnes word et grade (note 0–5). Remplace la liste actuelle.",
+            label_visibility="visible",
+        )
+        if uploaded_kw_csv is not None:
+            body = uploaded_kw_csv.getvalue()
+            digest = hashlib.sha256(body).hexdigest()
+            if st.session_state.get("_kw_csv_import_hash") != digest:
+                ok_csv, msg_csv = _apply_keywords_csv_to_session(body)
+                st.session_state["_kw_csv_import_hash"] = digest
+                if ok_csv:
+                    st.rerun()
+                else:
+                    st.warning(msg_csv)
+
+    with col_kw:
+        with st.expander("Mots-clés — analyse", expanded=True):
+            kw_entries = _render_keyword_inputs()
 
     tab_explorer, tab_analyse = st.tabs(["Dossiers (exploration)", "Analyse"])
 
