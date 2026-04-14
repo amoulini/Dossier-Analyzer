@@ -1,4 +1,8 @@
-"""Build an in-memory tree of folders and supported files from a local root."""
+"""Folder tree model shared with GCS (``TreeNode``) and optional local-disk scanning.
+
+The Streamlit app builds trees from cloud object listings via ``gcs_tree``. The
+``build_tree`` function remains for scripts or tools that walk a real directory.
+"""
 
 from __future__ import annotations
 
@@ -82,11 +86,4 @@ def iter_leaf_folder_nodes(node: TreeNode) -> list[TreeNode]:
     out: list[TreeNode] = []
     for c in node.children:
         out.extend(iter_leaf_folder_nodes(c))
-    return out
-
-
-def iter_folder_nodes(node: TreeNode) -> list[TreeNode]:
-    out: list[TreeNode] = [node]
-    for c in node.children:
-        out.extend(iter_folder_nodes(c))
     return out

@@ -1,5 +1,10 @@
-"""Dossier Analyzer: document dossier tree scanning, text extraction, and keyword matching."""
+"""Dossier Analyzer: keyword matching and tree types used by the GCS-backed app.
 
+Local directory scanning (``build_tree``, etc.) lives in ``dossier_analyzer.scan``.
+Text extraction for bytes streams lives in ``dossier_analyzer.extract``.
+"""
+
+from dossier_analyzer.extract import extract_text_from_bytes
 from dossier_analyzer.match import (
     KeywordEntry,
     RankedFolderMatch,
@@ -7,22 +12,12 @@ from dossier_analyzer.match import (
     normalize_keyword_entries,
     ranked_folder_matches,
 )
-from dossier_analyzer.scan import (
-    TreeNode,
-    build_tree,
-    count_folders,
-    count_leaf_folders,
-    iter_leaf_folder_nodes,
-)
-from dossier_analyzer.extract import extract_text_for_path
+from dossier_analyzer.scan import TreeNode, count_leaf_folders
 
 __all__ = [
     "TreeNode",
-    "build_tree",
-    "count_folders",
     "count_leaf_folders",
-    "iter_leaf_folder_nodes",
-    "extract_text_for_path",
+    "extract_text_from_bytes",
     "KeywordEntry",
     "RankedFolderMatch",
     "match_folders",

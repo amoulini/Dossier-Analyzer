@@ -10,8 +10,6 @@ import io
 import mimetypes
 import os
 import re
-import stat
-import sys
 import uuid
 from html import escape
 from pathlib import Path
@@ -56,7 +54,7 @@ from dossier_analyzer.match import (
 )
 from dossier_analyzer.scan import TreeNode, count_leaf_folders
 
-# Pass as first arg to file_text_index so Streamlit cache keys never match stale disk entries.
+# Bumps Streamlit disk cache when the indexing strategy changes (see ``file_text_index_gcs``).
 _CACHE_SERIAL = "dossier-analyzer-6"
 _GCS_WORKSPACE_MARKER = "__dossier_gcs_workspace__"
 _MAX_GCS_INDEX_BYTES = int(os.environ.get("GCS_MAX_INDEX_BYTES", str(50 * 1024 * 1024)))
@@ -224,7 +222,7 @@ def _gcs_bucket_name() -> str:
 
 
 def _user_storage_prefix() -> str | None:
-    """Same layout as login_page: OIDC sub slug, else SHA-256 of email."""
+    """Stable per-user prefix: OIDC ``sub`` slug, else SHA-256 of email."""
     try:
         info = dict(st.user)
     except Exception:
@@ -276,10 +274,9 @@ def file_text_index_gcs(
 
 def _default_keyword_seed_rows() -> list[dict]:
     return [
-        {"id": uuid.uuid4().hex[:10], "text": "", "positivity": 3},
-        # {"id": uuid.uuid4().hex[:10], "text": "Excellent niveau", "positivity": 5},
-        # {"id": uuid.uuid4().hex[:10], "text": "Bon niveau", "positivity": 4},
-        # {"id": uuid.uuid4().hex[:10], "text": "Irrégulier", "positivity": 1},
+        {"id": uuid.uuid4().hex[:10], "text": "Excellent niveau", "positivity": 5},
+        {"id": uuid.uuid4().hex[:10], "text": "Bon niveau", "positivity": 4},
+        {"id": uuid.uuid4().hex[:10], "text": "Irrégulier", "positivity": 1},
     ]
 
 
@@ -295,175 +292,6 @@ def _ensure_session() -> None:
     for r in st.session_state.kw_rows:
         if "positivity" not in r:
             r["positivity"] = 3
-
-
-def _native_file_dialog_usable() -> bool:
-    """Tk file dialog only works where the Streamlit process has a desktop."""
-    if sys.platform == "win32":
-        return True
-    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-
-
-def _is_path_under(child: Path, base: Path) -> bool:
-    try:
-        child.resolve().relative_to(base.resolve())
-        return True
-    except ValueError:
-        return False
-
-
-def _user_home_path() -> Path:
-    """Dossier utilisateur : ~ sous Linux/macOS, profil utilisateur sous Windows (%USERPROFILE%)."""
-    return Path.home().resolve()
-
-
-def _default_workspace_path_str() -> str:
-    """Chemin par défaut pour le dossier racine : variable d’environnement ou dossier utilisateur."""
-    env_root = (os.environ.get("DOSSIER_ANALYZER_ROOT") or "").strip()
-    if env_root:
-        return env_root
-    return str(_user_home_path())
-
-
-def _filesystem_browse_top() -> Path:
-    """Racine haute du navigateur : `/` sous Linux/macOS, racine du lecteur (ex. `C:\\`) sous Windows."""
-    if sys.platform == "win32":
-        home = _user_home_path()
-        anch = home.anchor
-        if anch and anch != "\\":
-            root = Path(anch)
-            if root.exists():
-                return root.resolve()
-        return home
-    return Path("/").resolve()
-
-
-def _normalize_workspace_root_path() -> Path:
-    """Garde `root_path_input` comme chemin dossier valide sous la racine disque ; renvoie le Path résolu."""
-    top = _filesystem_browse_top()
-    home = _user_home_path()
-    raw = str(st.session_state.get("root_path_input", "") or "").strip()
-    if not raw:
-        cur = home if home.is_dir() else top
-        st.session_state.root_path_input = str(cur)
-        return cur.resolve()
-    cur = Path(raw).expanduser().resolve()
-    if not _is_path_under(cur, top):
-        cur = top
-        st.session_state.root_path_input = str(cur)
-        return cur.resolve()
-    if not cur.is_dir():
-        cur = home if home.is_dir() else top
-        st.session_state.root_path_input = str(cur)
-        return cur.resolve()
-    st.session_state.root_path_input = str(cur)
-    return cur.resolve()
-
-
-def _should_hide_folder_in_browser(p: Path) -> bool:
-    """Masque les dossiers cachés et ceux dont le nom commence par un point."""
-    if not p.is_dir():
-        return True
-    if p.name.startswith("."):
-        return True
-    try:
-        st_info = p.stat()
-    except OSError:
-        return True
-    if sys.platform == "win32" and hasattr(st_info, "st_file_attributes"):
-        if st_info.st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN:
-            return True
-    return False
-
-
-def _render_server_folder_browser() -> None:
-    """Navigateur de dossiers : met à jour `root_path_input` (seule source pour le dossier choisi)."""
-    top = _filesystem_browse_top()
-    cur = _normalize_workspace_root_path()
-
-    st.caption(
-        "Navigation locale : vous ne pouvez pas remonter au‑dessus de la racine du disque "
-        f"(`{top.as_posix()}`)."
-    )
-
-    home = _user_home_path()
-    up_col, home_col, root_col = st.columns(3)
-    with up_col:
-        if cur != top and _is_path_under(cur.parent, top):
-            if st.button("↑ Remonter", key="srv_browse_up", use_container_width=True):
-                st.session_state.root_path_input = str(cur.parent.resolve())
-                st.rerun()
-    with home_col:
-        if st.button(
-            "Dossier utilisateur",
-            key="srv_browse_home",
-            use_container_width=True,
-            help="Linux / macOS : ~ / $HOME ; Windows : profil utilisateur.",
-        ):
-            st.session_state.root_path_input = str(home if home.is_dir() else top)
-            st.rerun()
-    with root_col:
-        if cur != top:
-            if st.button("Racine du disque", key="srv_browse_root", use_container_width=True):
-                st.session_state.root_path_input = str(top)
-                st.rerun()
-
-    try:
-        subs = sorted(
-            (p for p in cur.iterdir() if not _should_hide_folder_in_browser(p)),
-            key=lambda p: p.name.lower(),
-        )
-    except PermissionError:
-        st.error("Permission refusée pour lire ce dossier.")
-        subs = []
-
-    if not subs:
-        st.caption("Aucun sous-dossier ici.")
-        return
-
-    st.caption("Sous-dossiers — cliquer pour entrer :")
-    with st.container(height=280, border=True):
-        ncols = 3
-        for row_start in range(0, len(subs), ncols):
-            chunk = subs[row_start : row_start + ncols]
-            cols = st.columns(ncols, gap="small")
-            for j, p in enumerate(chunk):
-                with cols[j]:
-                    bkey = f"sd_{hashlib.sha256(str(p).encode()).hexdigest()[:18]}"
-                    if st.button(p.name, key=bkey, use_container_width=True):
-                        st.session_state.root_path_input = str(p.resolve())
-                        st.rerun()
-
-
-def _render_workspace_picker() -> None:
-    """Premier écran : choisir explicitement le dossier racine avant le reste de l’application."""
-    if "root_path_input" not in st.session_state:
-        st.session_state.root_path_input = _default_workspace_path_str()
-    cur = _normalize_workspace_root_path()
-
-    use_tk = _native_file_dialog_usable()
-    st.title("Dossier Analyzer")
-    st.markdown(
-        "Bienvenue. **Choisissez le dossier racine** uniquement via **Parcourir les dossiers sur cette machine** "
-        "ci‑dessous, puis cliquez sur **Ouvrir ce dossier**."
-    )
-
-    st.markdown("##### Chemin du dossier racine")
-    st.code(str(cur), language=None)
-
-    with st.expander(
-        "Parcourir les dossiers sur cette machine",
-        expanded=not use_tk,
-    ):
-        _render_server_folder_browser()
-
-    if st.button("Ouvrir ce dossier", type="primary"):
-        if cur.is_dir():
-            st.session_state.browse_root = str(cur)
-            st.session_state.selected_file = None
-            st.rerun()
-        else:
-            st.error("Ce chemin n’est pas un dossier valide.")
 
 
 def _apply_keywords_csv_to_session(raw: bytes) -> tuple[bool, str]:
@@ -643,8 +471,7 @@ def _render_keyword_list_menu_content(client, bucket: str, user_prefix: str) -> 
     """Content of the vertical ellipsis menu: load / create / rename / delete keyword lists (GCS)."""
     st.markdown("**Listes de mots-clés (cloud)**")
     st.caption(
-        "Enregistrement automatique toutes les 10 secondes si la liste a changé "
-        "(CSV sous `keyword_lists/`)."
+        "Enregistrement automatique toutes les 10 secondes."
     )
     slugs = list_keyword_list_slugs(client, bucket, user_prefix)
     slug_being_edited = str(st.session_state.get("kw_active_slug", DEFAULT_LIST_SLUG))
@@ -654,7 +481,7 @@ def _render_keyword_list_menu_content(client, bucket: str, user_prefix: str) -> 
 
     idx = slugs.index(slug_being_edited) if slug_being_edited in slugs else 0
     choice = st.selectbox(
-        "Liste chargée",
+        "**Liste chargée**",
         options=slugs,
         index=idx,
         format_func=format_keyword_list_label,
@@ -681,7 +508,7 @@ def _render_keyword_list_menu_content(client, bucket: str, user_prefix: str) -> 
     c1, c2 = st.columns(2, gap="small")
     with c1:
         new_slug_raw = st.text_input(
-            "Nouvelle liste (nom)",
+            "**Nouvelle liste (nom)**",
             key="kw_new_list_slug_input",
             placeholder="ex. contrat_2024",
             help="Lettres minuscules, chiffres, points, tirets, underscores.",
@@ -726,7 +553,7 @@ def _render_keyword_list_menu_content(client, bucket: str, user_prefix: str) -> 
     with c2:
         st.caption(f"Listes : **{len(slugs)}** / {MAX_LISTS_PER_USER}")
         ren_from = st.selectbox(
-            "Renommer la liste",
+            "**Renommer la liste**",
             options=slugs,
             key="kw_rename_from_select",
             format_func=format_keyword_list_label,
@@ -768,7 +595,7 @@ def _render_keyword_list_menu_content(client, bucket: str, user_prefix: str) -> 
         deletable = [s for s in slugs if s != DEFAULT_LIST_SLUG]
         if deletable:
             del_pick = st.selectbox(
-                "Supprimer une liste",
+                "**Supprimer une liste**",
                 options=deletable,
                 key="kw_delete_pick_select",
                 format_func=format_keyword_list_label,
@@ -961,7 +788,7 @@ def _render_keyword_inputs(client, bucket: str, user_prefix: str) -> list[Keywor
             "Charger mots-clés depuis CSV",
             type=["csv"],
             key="kw_csv_uploader",
-            help="Même format que data/keywords.csv : colonnes word et grade (note 0–5). Remplace la liste active.",
+            help="Remplace la liste active. Format du CSV: 2 colonnes 'word' et 'grade' (note 0–5), première ligne pour les en-têtes, pas de ligne vide, ',' comme séparateur.",
             label_visibility="visible",
             width=200,
         )
@@ -1311,22 +1138,6 @@ def _render_file_tree(
 
 
 
-def _show_pdf(path: Path) -> None:
-    try:
-        doc = fitz.open(path)
-    except Exception as e:
-        st.error(f"Impossible d’ouvrir le PDF : {e}")
-        return
-    try:
-        for i in range(len(doc)):
-            page = doc[i]
-            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-            data = pix.tobytes("png")
-            st.image(io.BytesIO(data), width="stretch", caption=f"Page {i + 1} / {len(doc)}")
-    finally:
-        doc.close()
-
-
 def _show_pdf_bytes(data: bytes) -> None:
     try:
         doc = fitz.open(stream=data, filetype="pdf")
@@ -1343,39 +1154,19 @@ def _show_pdf_bytes(data: bytes) -> None:
         doc.close()
 
 
-def _show_markdown(path: Path | None, text: str | None = None) -> None:
-    if text is None:
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
-        except OSError as e:
-            st.error(f"Impossible de lire le fichier : {e}")
-            return
+def _show_markdown(text: str) -> None:
     st.markdown(text)
 
 
-def _show_image(path: Path | None, image_bytes: bytes | None = None) -> None:
+def _show_image(image_bytes: bytes) -> None:
     try:
-        if image_bytes is not None:
-            st.image(io.BytesIO(image_bytes), width="stretch")
-        else:
-            st.image(str(path), width="stretch")
+        st.image(io.BytesIO(image_bytes), width="stretch")
     except Exception as e:
         st.error(f"Impossible d’afficher l’image : {e}")
 
 
-def _display_path_under_root(path: Path, browse_root: Path) -> None:
-    """Show path relative to browse root (posix); avoids repeating the default dossier root."""
-    abs_path = path.resolve()
-    root_r = browse_root.resolve()
-    try:
-        rel = abs_path.relative_to(root_r)
-        st.text(rel.as_posix())
-    except ValueError:
-        st.text(abs_path.as_posix())
-
-
 def _render_gcs_document_viewer(bucket: str) -> None:
-    st.markdown("##### Document visualizer")
+    st.markdown("##### Visualisation du document")
     sel = st.session_state.selected_file
     if not sel:
         st.caption("Sélectionnez un fichier dans l’arborescence.")
@@ -1411,9 +1202,9 @@ def _render_gcs_document_viewer(bucket: str) -> None:
         if suffix == ".pdf":
             _show_pdf_bytes(data)
         elif suffix in {".md", ".markdown"}:
-            _show_markdown(path=None, text=data.decode("utf-8", errors="replace"))
+            _show_markdown(data.decode("utf-8", errors="replace"))
         elif suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}:
-            _show_image(path=None, image_bytes=data)
+            _show_image(data)
         else:
             st.info("Format non pris en charge pour l’aperçu.")
 
