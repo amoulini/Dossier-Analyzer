@@ -35,6 +35,18 @@ from dossier_analyzer.gcs_tree import (
     gcs_index_fingerprint,
     list_user_blob_entries,
 )
+from dossier_analyzer.keyword_lists_gcs import (
+    DEFAULT_LIST_LABEL,
+    DEFAULT_LIST_SLUG,
+    MAX_LISTS_PER_USER,
+    delete_keyword_list_csv,
+    download_keyword_list_csv,
+    format_keyword_list_label,
+    list_keyword_list_slugs,
+    rename_keyword_list_csv,
+    sanitize_keyword_list_slug,
+    upload_keyword_list_csv,
+)
 from dossier_analyzer.match import (
     KeywordEntry,
     RankedFolderMatch,
@@ -95,6 +107,14 @@ _GCS_TREE_POPOVER_EPOCH = "_gcs_tree_popover_epoch"
 def _gcs_bump_tree_popover_epoch() -> None:
     """Remount folder popovers with a new widget key so they render closed after an action."""
     st.session_state[_GCS_TREE_POPOVER_EPOCH] = int(st.session_state.get(_GCS_TREE_POPOVER_EPOCH, 0)) + 1
+
+
+_KW_LISTS_POPOVER_EPOCH = "_kw_lists_popover_epoch"
+
+
+def _bump_kw_lists_popover_epoch() -> None:
+    """Remount the keyword-list menu popover so it closes after an action."""
+    st.session_state[_KW_LISTS_POPOVER_EPOCH] = int(st.session_state.get(_KW_LISTS_POPOVER_EPOCH, 0)) + 1
 
 
 # Une couleur de fond distincte par note (0 → 5), progression chromatique rouge → vert.
@@ -228,17 +248,23 @@ def file_text_index_gcs(
     return corpus
 
 
+def _default_keyword_seed_rows() -> list[dict]:
+    return [
+        {"id": uuid.uuid4().hex[:10], "text": "Excellent niveau", "positivity": 5},
+        {"id": uuid.uuid4().hex[:10], "text": "Bon niveau", "positivity": 4},
+        {"id": uuid.uuid4().hex[:10], "text": "Irrégulier", "positivity": 1},
+    ]
+
+
 def _ensure_session() -> None:
     if "browse_root" not in st.session_state:
         st.session_state.browse_root = None
     if "selected_file" not in st.session_state:
         st.session_state.selected_file = None
+    if "kw_active_slug" not in st.session_state:
+        st.session_state.kw_active_slug = DEFAULT_LIST_SLUG
     if "kw_rows" not in st.session_state:
-        st.session_state.kw_rows = [
-            {"id": "init-1", "text": "Excellent niveau", "positivity": 5},
-            {"id": "init-2", "text": "Bon niveau", "positivity": 4},
-            {"id": "init-3", "text": "Irrégulier", "positivity": 1},
-        ]
+        st.session_state.kw_rows = _default_keyword_seed_rows()
     for r in st.session_state.kw_rows:
         if "positivity" not in r:
             r["positivity"] = 3
@@ -461,9 +487,6 @@ def _apply_keywords_csv_to_session(raw: bytes) -> tuple[bool, str]:
         g = max(0, min(5, g))
         new_rows.append({"id": uuid.uuid4().hex[:10], "text": w, "positivity": g})
 
-    if not new_rows:
-        return False, "Aucune ligne de mot-clé valide."
-
     for r in st.session_state.kw_rows:
         rid = r["id"]
         st.session_state.pop(f"kw_{rid}", None)
@@ -471,7 +494,307 @@ def _apply_keywords_csv_to_session(raw: bytes) -> tuple[bool, str]:
         st.session_state.pop(f"del_{rid}", None)
 
     st.session_state.kw_rows = new_rows
+    if not new_rows:
+        return True, "Liste vide (aucun mot-clé)."
     return True, f"{len(new_rows)} mot(s)-clé chargé(s)."
+
+
+def _kw_rows_to_csv_bytes(rows: list[dict]) -> bytes:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["word", "grade"])
+    for r in rows:
+        text = str(r.get("text", "") or "").strip()
+        if not text:
+            continue
+        try:
+            g = int(r.get("positivity", 3))
+        except (TypeError, ValueError):
+            g = 3
+        g = max(0, min(5, g))
+        writer.writerow([text, g])
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def _kw_digest_from_rows(rows: list[dict]) -> str:
+    return hashlib.sha256(_kw_rows_to_csv_bytes(rows)).hexdigest()
+
+
+def _sync_kw_rows_from_widget_session_state() -> None:
+    """Aligne ``kw_rows`` sur les clés de widgets (utile avant sauvegarde : le menu s’affiche avant les champs)."""
+    for row in st.session_state.kw_rows:
+        wk = f"kw_{row['id']}"
+        pk = f"kw_pos_{row['id']}"
+        if wk in st.session_state:
+            row["text"] = str(st.session_state[wk] or "")
+        if pk in st.session_state:
+            try:
+                row["positivity"] = int(st.session_state[pk])
+            except (TypeError, ValueError):
+                row["positivity"] = 3
+
+
+def _keyword_rows_snapshot_for_upload() -> list[dict]:
+    """Latest keyword table from widgets + ``kw_rows`` ids (for autosync without a full script run)."""
+    out: list[dict] = []
+    for r in st.session_state.kw_rows:
+        rid = r["id"]
+        wk = f"kw_{rid}"
+        pk = f"kw_pos_{rid}"
+        text = str(st.session_state.get(wk, r.get("text", "")) or "")
+        try:
+            pos = int(st.session_state.get(pk, r.get("positivity", 3)))
+        except (TypeError, ValueError):
+            pos = 3
+        pos = max(0, min(5, pos))
+        out.append({"id": rid, "text": text, "positivity": pos})
+    return out
+
+
+def _flush_keyword_list_to_gcs(
+    client, bucket: str, user_prefix: str, list_slug: str
+) -> None:
+    """Envoie le tableau de mots-clés actuel (widgets / ``kw_rows``) vers le CSV ``list_slug``."""
+    _sync_kw_rows_from_widget_session_state()
+    rows = _keyword_rows_snapshot_for_upload()
+    data = _kw_rows_to_csv_bytes(rows)
+    upload_keyword_list_csv(client, bucket, user_prefix, list_slug, data)
+    st.session_state.kw_last_uploaded_digest = _kw_digest_from_rows(rows)
+
+
+def _flush_active_keyword_list_to_gcs(client, bucket: str, user_prefix: str) -> None:
+    """Persist the active list immediately (e.g. before switching or renaming)."""
+    active = str(st.session_state.get("kw_active_slug", DEFAULT_LIST_SLUG))
+    _flush_keyword_list_to_gcs(client, bucket, user_prefix, active)
+
+
+def _load_keyword_list_bytes_into_session(raw: bytes) -> tuple[bool, str]:
+    ok, msg = _apply_keywords_csv_to_session(raw)
+    if ok:
+        rows = list(st.session_state.kw_rows)
+        st.session_state.kw_last_uploaded_digest = _kw_digest_from_rows(rows)
+        st.session_state.pop("_kw_debounce_digest", None)
+        st.session_state.pop("_kw_debounce_start", None)
+    return ok, msg
+
+
+def _hydrate_keyword_lists_if_needed(client, bucket: str, user_prefix: str) -> None:
+    if st.session_state.get("_kw_hydrated_for") == user_prefix:
+        return
+
+    slugs = list_keyword_list_slugs(client, bucket, user_prefix)
+    if not slugs:
+        seed = _default_keyword_seed_rows()
+        body = _kw_rows_to_csv_bytes(seed)
+        upload_keyword_list_csv(client, bucket, user_prefix, DEFAULT_LIST_SLUG, body)
+        slugs = [DEFAULT_LIST_SLUG]
+
+    active = str(st.session_state.get("kw_active_slug", DEFAULT_LIST_SLUG))
+    if active not in slugs:
+        active = DEFAULT_LIST_SLUG
+    st.session_state.kw_active_slug = active
+
+    raw = download_keyword_list_csv(client, bucket, user_prefix, active)
+    if raw is None:
+        raw = _kw_rows_to_csv_bytes(_default_keyword_seed_rows())
+    ok, _msg = _load_keyword_list_bytes_into_session(raw)
+    if not ok:
+        st.session_state.kw_rows = _default_keyword_seed_rows()
+        st.session_state.kw_last_uploaded_digest = _kw_digest_from_rows(st.session_state.kw_rows)
+
+    st.session_state["_kw_hydrated_for"] = user_prefix
+
+
+def _render_keyword_list_menu_content(client, bucket: str, user_prefix: str) -> None:
+    """Content of the vertical ellipsis menu: load / create / rename / delete keyword lists (GCS)."""
+    st.markdown("**Listes de mots-clés (cloud)**")
+    st.caption(
+        "Enregistrement automatique toutes les 10 secondes si la liste a changé "
+        "(CSV sous `keyword_lists/`)."
+    )
+    slugs = list_keyword_list_slugs(client, bucket, user_prefix)
+    slug_being_edited = str(st.session_state.get("kw_active_slug", DEFAULT_LIST_SLUG))
+    if slug_being_edited not in slugs and slugs:
+        slug_being_edited = slugs[0]
+        st.session_state.kw_active_slug = slug_being_edited
+
+    idx = slugs.index(slug_being_edited) if slug_being_edited in slugs else 0
+    choice = st.selectbox(
+        "Liste chargée",
+        options=slugs,
+        index=idx,
+        format_func=format_keyword_list_label,
+        help=f"Jusqu’à {MAX_LISTS_PER_USER} listes par compte. Fichiers : users/…/keyword_lists/*.csv",
+    )
+    if choice != slug_being_edited:
+        try:
+            _flush_keyword_list_to_gcs(client, bucket, user_prefix, slug_being_edited)
+        except Exception as ex:
+            st.session_state["_kw_list_toolbar_error"] = f"Enregistrement impossible : {ex}"
+            st.rerun()
+        raw = download_keyword_list_csv(client, bucket, user_prefix, choice)
+        if raw is None:
+            st.session_state["_kw_list_toolbar_error"] = "Liste introuvable dans le cloud."
+            st.rerun()
+        ok, msg = _load_keyword_list_bytes_into_session(raw)
+        if not ok:
+            st.session_state["_kw_list_toolbar_error"] = msg
+            st.rerun()
+        st.session_state.kw_active_slug = choice
+        _bump_kw_lists_popover_epoch()
+        st.rerun()
+
+    c1, c2 = st.columns(2, gap="small")
+    with c1:
+        new_slug_raw = st.text_input(
+            "Nouvelle liste (nom)",
+            key="kw_new_list_slug_input",
+            placeholder="ex. contrat_2024",
+            help="Lettres minuscules, chiffres, points, tirets, underscores.",
+        )
+        if st.button(
+            "Créer cette liste",
+            key="kw_create_list_btn",
+            disabled=len(slugs) >= MAX_LISTS_PER_USER,
+            width="stretch",
+        ):
+            if len(slugs) >= MAX_LISTS_PER_USER:
+                st.session_state["_kw_list_toolbar_error"] = (
+                    f"Limite de {MAX_LISTS_PER_USER} listes atteinte. Supprimez une liste avant d’en créer une autre."
+                )
+                st.rerun()
+            try:
+                new_s = sanitize_keyword_list_slug(new_slug_raw)
+            except ValueError as ex:
+                st.session_state["_kw_list_toolbar_error"] = str(ex)
+                st.rerun()
+            if new_s in slugs:
+                st.session_state["_kw_list_toolbar_error"] = "Une liste porte déjà ce nom."
+                st.rerun()
+            try:
+                _flush_active_keyword_list_to_gcs(client, bucket, user_prefix)
+                empty_csv = _kw_rows_to_csv_bytes([])
+                upload_keyword_list_csv(client, bucket, user_prefix, new_s, empty_csv)
+                ok, msg = _load_keyword_list_bytes_into_session(empty_csv)
+                if not ok:
+                    st.session_state["_kw_list_toolbar_error"] = msg
+                    st.rerun()
+                st.session_state.kw_active_slug = new_s
+                st.session_state["_kw_list_toolbar_info"] = (
+                    f"Liste « {format_keyword_list_label(new_s)} » créée et chargée."
+                )
+                _bump_kw_lists_popover_epoch()
+                st.rerun()
+            except Exception as ex:
+                st.session_state["_kw_list_toolbar_error"] = str(ex)
+                st.rerun()
+
+    with c2:
+        st.caption(f"Listes : **{len(slugs)}** / {MAX_LISTS_PER_USER}")
+        ren_from = st.selectbox(
+            "Renommer la liste",
+            options=slugs,
+            key="kw_rename_from_select",
+            format_func=format_keyword_list_label,
+        )
+        ren_to_raw = st.text_input("Nouveau nom", key="kw_rename_to_input", placeholder="nouveau_nom")
+        if st.button("Renommer", key="kw_rename_do_btn", width="stretch"):
+            if ren_from == DEFAULT_LIST_SLUG:
+                st.session_state["_kw_list_toolbar_error"] = (
+                    f"« {DEFAULT_LIST_LABEL} » ne peut pas être renommée."
+                )
+                st.rerun()
+            try:
+                new_s = sanitize_keyword_list_slug(ren_to_raw)
+            except ValueError as ex:
+                st.session_state["_kw_list_toolbar_error"] = str(ex)
+                st.rerun()
+            if new_s == ren_from:
+                st.session_state["_kw_list_toolbar_error"] = "Le nom est identique."
+                st.rerun()
+            if new_s in slugs:
+                st.session_state["_kw_list_toolbar_error"] = "Ce nom est déjà utilisé."
+                st.rerun()
+            try:
+                if ren_from == str(st.session_state.get("kw_active_slug")):
+                    _flush_active_keyword_list_to_gcs(client, bucket, user_prefix)
+                rename_keyword_list_csv(client, bucket, user_prefix, ren_from, new_s)
+                if ren_from == str(st.session_state.get("kw_active_slug")):
+                    st.session_state.kw_active_slug = new_s
+                st.session_state["_kw_list_toolbar_info"] = (
+                    f"Liste renommée : « {format_keyword_list_label(ren_from)} » → "
+                    f"« {format_keyword_list_label(new_s)} »."
+                )
+                _bump_kw_lists_popover_epoch()
+                st.rerun()
+            except Exception as ex:
+                st.session_state["_kw_list_toolbar_error"] = str(ex)
+                st.rerun()
+
+        deletable = [s for s in slugs if s != DEFAULT_LIST_SLUG]
+        if deletable:
+            del_pick = st.selectbox(
+                "Supprimer une liste",
+                options=deletable,
+                key="kw_delete_pick_select",
+                format_func=format_keyword_list_label,
+            )
+            if st.button("Supprimer la liste sélectionnée", key="kw_delete_do_btn", type="secondary"):
+                try:
+                    if del_pick == str(st.session_state.get("kw_active_slug")):
+                        others = [s for s in slugs if s != del_pick]
+                        if not others:
+                            raise RuntimeError("Impossible de supprimer la dernière liste.")
+                        fallback = (
+                            DEFAULT_LIST_SLUG
+                            if DEFAULT_LIST_SLUG in others
+                            else others[0]
+                        )
+                        _flush_active_keyword_list_to_gcs(client, bucket, user_prefix)
+                        raw_fb = download_keyword_list_csv(client, bucket, user_prefix, fallback)
+                        if raw_fb is None:
+                            raise RuntimeError("Impossible de charger une liste de secours.")
+                        ok, msg = _load_keyword_list_bytes_into_session(raw_fb)
+                        if not ok:
+                            raise RuntimeError(msg)
+                        st.session_state.kw_active_slug = fallback
+                    delete_keyword_list_csv(client, bucket, user_prefix, del_pick)
+                    st.session_state["_kw_list_toolbar_info"] = (
+                        f"Liste « {format_keyword_list_label(del_pick)} » supprimée."
+                    )
+                    _bump_kw_lists_popover_epoch()
+                    st.rerun()
+                except Exception as ex:
+                    st.session_state["_kw_list_toolbar_error"] = str(ex)
+                    st.rerun()
+        else:
+            st.caption(
+                f"Seule la liste « {DEFAULT_LIST_LABEL} » existe ; elle ne peut pas être supprimée."
+            )
+
+
+@st.fragment(run_every=10)
+def _keyword_list_gcs_autosync_fragment() -> None:
+    if not bool(getattr(st.user, "is_logged_in", False)):
+        return
+    bucket = _gcs_bucket_name()
+    user_prefix = _user_storage_prefix()
+    if not bucket or not user_prefix:
+        return
+    if st.session_state.get("_kw_hydrated_for") != user_prefix:
+        return
+    client = _gcs_client_app()
+    active = str(st.session_state.get("kw_active_slug", DEFAULT_LIST_SLUG))
+    rows = _keyword_rows_snapshot_for_upload()
+    csv_bytes = _kw_rows_to_csv_bytes(rows)
+    digest = hashlib.sha256(csv_bytes).hexdigest()
+    if digest == st.session_state.get("kw_last_uploaded_digest"):
+        return
+    try:
+        upload_keyword_list_csv(client, bucket, user_prefix, active, csv_bytes)
+        st.session_state.kw_last_uploaded_digest = digest
+    except Exception as ex:
+        st.session_state["_kw_autosync_error"] = str(ex)
 
 
 def _init_kw_row_widgets() -> None:
@@ -508,13 +831,35 @@ def _make_persist_positivity(row_id: str):
     return _persist
 
 
-def _render_keyword_inputs() -> list[KeywordEntry]:
-    st.caption(
-        "Saisie dynamique : barre rouge à gauche. "
-        "Recherche insensible à la casse, sous-chaîne dans le texte de chaque fichier (PDF, Markdown, nom pour les images). "
-        "Tri Analyse : le curseur Positif (0–5) pondère le classement (0 = pas positif, 5 = très positif). "
-        "Ces champs restent en place lorsque vous passez à l’onglet Dossiers."
-    )
+def _render_keyword_inputs(client, bucket: str, user_prefix: str) -> list[KeywordEntry]:
+    err = st.session_state.pop("_kw_list_toolbar_error", None)
+    if err:
+        st.warning(err)
+    info = st.session_state.pop("_kw_list_toolbar_info", None)
+    if info:
+        st.success(info)
+    sync_err = st.session_state.pop("_kw_autosync_error", None)
+    if sync_err:
+        st.warning(f"Synchronisation cloud (10 s) : {sync_err}")
+
+    slug = str(st.session_state.get("kw_active_slug", DEFAULT_LIST_SLUG))
+    meta_col, desc_col = st.columns([2.8, 9.2], vertical_alignment="center", gap="small")
+    with meta_col:
+        pop_key = f"kw_lists_menu_{int(st.session_state.get(_KW_LISTS_POPOVER_EPOCH, 0))}"
+        with st.popover(
+            format_keyword_list_label(slug),
+            help="Charger ou gérer les listes de mots-clés",
+            key=pop_key,
+            type="primary",
+            use_container_width=True,
+        ):
+            _render_keyword_list_menu_content(client, bucket, user_prefix)
+    with desc_col:
+        st.caption(
+            "Saisie dynamique : "
+            "Recherche insensible à la casse, sous-chaîne dans le texte de chaque fichier (PDF, Markdown, nom pour les images). "
+            "Tri Analyse : le curseur Positif (0–5) pondère le classement (0 = pas positif, 5 = très positif). "
+        )
 
     _init_kw_row_widgets()
     rows = list(st.session_state.kw_rows)
@@ -1030,6 +1375,8 @@ def main() -> None:
     st.caption("Exploration cloud et analyse par mots-clés.")
 
     client = _gcs_client_app()
+    _hydrate_keyword_lists_if_needed(client, bucket, user_prefix)
+    _keyword_list_gcs_autosync_fragment()
     entries = list_user_blob_entries(client, bucket, user_prefix)
     fp = gcs_index_fingerprint(entries)
     tree, path_map = build_tree_from_gcs_entries(entries, bucket, user_prefix)
@@ -1038,7 +1385,6 @@ def main() -> None:
 
     with st.sidebar:
         st.markdown("### Dossier cloud")
-        st.text(f"gs://{bucket}/users/{user_prefix}/")
         if st.button(
             "Actualiser l’index",
             use_container_width=True,
@@ -1057,7 +1403,7 @@ def main() -> None:
             "Charger mots-clés depuis CSV",
             type=["csv"],
             key="kw_csv_uploader",
-            help="Même format que data/keywords.csv : colonnes word et grade (note 0–5). Remplace la liste actuelle.",
+            help="Même format que data/keywords.csv : colonnes word et grade (note 0–5). Remplace la liste active.",
             label_visibility="visible",
         )
         if uploaded_kw_csv is not None:
@@ -1067,13 +1413,17 @@ def main() -> None:
                 ok_csv, msg_csv = _apply_keywords_csv_to_session(body)
                 st.session_state["_kw_csv_import_hash"] = digest
                 if ok_csv:
+                    try:
+                        _flush_active_keyword_list_to_gcs(client, bucket, user_prefix)
+                    except Exception as ex:
+                        st.session_state["_kw_autosync_error"] = str(ex)
                     st.rerun()
                 else:
                     st.warning(msg_csv)
 
     with col_kw:
         with st.expander("Mots-clés — analyse", expanded=True):
-            kw_entries = _render_keyword_inputs()
+            kw_entries = _render_keyword_inputs(client, bucket, user_prefix)
 
     tab_explorer, tab_analyse = st.tabs(["Dossiers (exploration)", "Analyse"])
 
