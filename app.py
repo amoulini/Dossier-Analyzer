@@ -7,6 +7,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import mimetypes
 import os
 import re
 import stat
@@ -20,6 +21,15 @@ import streamlit as st
 from openpyxl import Workbook
 
 from dossier_analyzer.extract import extract_text_from_bytes
+from dossier_analyzer.gcs_ops import (
+    DOSSIER_FOLDER_PLACEHOLDER,
+    create_subfolder_placeholder,
+    folder_gcs_prefix,
+    safe_delete_blob,
+    safe_delete_folder_prefix,
+    safe_upload_bytes,
+    sanitize_upload_filename,
+)
 from dossier_analyzer.gcs_tree import (
     build_tree_from_gcs_entries,
     gcs_index_fingerprint,
@@ -179,6 +189,8 @@ def file_text_index_gcs(
     corpus: dict[str, str] = {}
     for e in entries:
         rel = str(e["rel"])
+        if Path(rel).name == DOSSIER_FOLDER_PLACEHOLDER:
+            continue
         blob = b.blob(str(e["object_name"]))
         try:
             data = blob.download_as_bytes()
@@ -630,26 +642,202 @@ def _render_match_cards(corpus: dict[str, str], entries: list[KeywordEntry]) -> 
         )
 
 
-def _render_file_tree(node: TreeNode) -> None:
+def _gcs_invalidate_index() -> None:
+    file_text_index_gcs.clear()
+
+
+def _gcs_arborescence_dialogs(bucket: str, user_prefix: str) -> None:
+    client = _gcs_client_app()
+    pending_file = st.session_state.get("_gcs_dlg_delete_file")
+    if pending_file:
+
+        @st.dialog("Supprimer le fichier ?")
+        def _confirm_file_delete() -> None:
+            st.caption("Cette action est irréversible.")
+            st.code(Path(str(pending_file)).name)
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Confirmer", type="primary", key="gcs_del_file_ok"):
+                    try:
+                        safe_delete_blob(client, bucket, str(pending_file), user_prefix)
+                        st.session_state.pop("_gcs_dlg_delete_file", None)
+                        pm = st.session_state.get("_gcs_path_to_object", {})
+                        sel = st.session_state.get("selected_file")
+                        if sel and pm.get(sel) == pending_file:
+                            st.session_state.selected_file = None
+                        _gcs_invalidate_index()
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(str(ex))
+            with c2:
+                if st.button("Annuler", key="gcs_del_file_cancel"):
+                    st.session_state.pop("_gcs_dlg_delete_file", None)
+                    st.rerun()
+
+        _confirm_file_delete()
+        return
+
+    pending_folder = st.session_state.get("_gcs_dlg_delete_folder_rel")
+    if pending_folder is not None and str(pending_folder) not in (".", ""):
+
+        @st.dialog("Supprimer le dossier ?")
+        def _confirm_folder_delete() -> None:
+            st.warning("Tous les fichiers et sous-dossiers de ce dossier seront supprimés.")
+            st.code(str(pending_folder))
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Confirmer", type="primary", key="gcs_del_fol_ok"):
+                    try:
+                        safe_delete_folder_prefix(
+                            client,
+                            bucket,
+                            user_prefix,
+                            Path(str(pending_folder)),
+                        )
+                        st.session_state.pop("_gcs_dlg_delete_folder_rel", None)
+                        st.session_state.selected_file = None
+                        _gcs_invalidate_index()
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(str(ex))
+            with c2:
+                if st.button("Annuler", key="gcs_del_fol_cancel"):
+                    st.session_state.pop("_gcs_dlg_delete_folder_rel", None)
+                    st.rerun()
+
+        _confirm_folder_delete()
+
+
+def _folder_menu_popover(
+    folder_node: TreeNode,
+    bucket: str,
+    user_prefix: str,
+    *,
+    allow_delete_folder: bool,
+) -> None:
+    client = _gcs_client_app()
+    rel_key = folder_node.rel.as_posix()
+
+    with st.popover("\u22EE", help="Actions sur le dossier"):
+        if allow_delete_folder and st.button(
+            "Supprimer le dossier",
+            key=_safe_widget_key(rel_key, "gcs_f_del"),
+            width="stretch",
+        ):
+            st.session_state["_gcs_dlg_delete_folder_rel"] = rel_key
+            st.rerun()
+
+        st.markdown("**Envoyer un fichier**")
+        up = st.file_uploader(
+            "Fichier",
+            type=["pdf", "md", "markdown", "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif"],
+            key=_safe_widget_key(rel_key, "gcs_f_up"),
+            label_visibility="collapsed",
+        )
+        if up is not None and st.button(
+            "Envoyer vers ce dossier",
+            key=_safe_widget_key(rel_key, "gcs_f_up_do"),
+            width="stretch",
+        ):
+            try:
+                safe_name = sanitize_upload_filename(up.name)
+                pref = folder_gcs_prefix(user_prefix, folder_node.rel)
+                object_name = f"{pref}{safe_name}"
+                ctype, _ = mimetypes.guess_type(safe_name)
+                safe_upload_bytes(
+                    client,
+                    bucket,
+                    object_name,
+                    user_prefix,
+                    up.getvalue(),
+                    ctype,
+                )
+                st.success(f"Envoyé : {safe_name}")
+                _gcs_invalidate_index()
+                st.rerun()
+            except Exception as ex:
+                st.error(str(ex))
+
+        st.markdown("**Nouveau sous-dossier**")
+        sub = st.text_input(
+            "Nom",
+            key=_safe_widget_key(rel_key, "gcs_f_sub_txt"),
+            placeholder="nom-du-dossier",
+            label_visibility="collapsed",
+        )
+        if st.button(
+            "Créer le sous-dossier",
+            key=_safe_widget_key(rel_key, "gcs_f_sub_btn"),
+            width="stretch",
+        ):
+            if not (sub or "").strip():
+                st.warning("Entrez un nom.")
+            else:
+                try:
+                    create_subfolder_placeholder(
+                        client, bucket, user_prefix, folder_node.rel, sub
+                    )
+                    st.success("Dossier créé.")
+                    _gcs_invalidate_index()
+                    st.rerun()
+                except Exception as ex:
+                    st.error(str(ex))
+
+
+def _render_file_tree(
+    node: TreeNode,
+    bucket: str,
+    user_prefix: str,
+    path_to_object: dict[str, str],
+) -> None:
+    if node.rel == Path("."):
+        head = st.columns([5, 1])
+        with head[0]:
+            st.caption("Racine de votre espace")
+        with head[1]:
+            _folder_menu_popover(node, bucket, user_prefix, allow_delete_folder=False)
+
     if node.children:
         for child in node.children:
-            with st.expander(f"📁 {child.name}", expanded=False):
-                _render_file_tree(child)
+            with st.expander(f"\U0001f4c1 {child.name}", expanded=False):
+                row = st.columns([5, 1])
+                with row[1]:
+                    _folder_menu_popover(child, bucket, user_prefix, allow_delete_folder=True)
+                with row[0]:
+                    st.markdown("")
+                _render_file_tree(child, bucket, user_prefix, path_to_object)
+
     for fpath in node.files:
         label = f"{fpath.name}"
         if fpath.suffix.lower() == ".pdf":
-            label = f"📄 {label}"
+            label = f"\U0001f4c4 {label}"
         elif fpath.suffix.lower() in {".md", ".markdown"}:
-            label = f"📝 {label}"
+            label = f"\U0001f4dd {label}"
         else:
-            label = f"🖼 {label}"
+            label = f"\U0001f5bc {label}"
         resolved = str(fpath.resolve())
         is_selected = st.session_state.get("selected_file") == resolved
-        key = _safe_widget_key(str(fpath), "pick_file")
+        key_pick = _safe_widget_key(str(fpath), "pick_file")
+        key_bin = _safe_widget_key(str(fpath), "del_file")
         btn_type = "primary" if is_selected else "secondary"
-        if st.button(label, key=key, type=btn_type, width="stretch"):
-            st.session_state.selected_file = resolved
-            st.rerun()
+        fc, fb = st.columns([0.82, 0.18])
+        with fc:
+            if st.button(label, key=key_pick, type=btn_type, width="stretch"):
+                st.session_state.selected_file = resolved
+                st.rerun()
+        with fb:
+            if st.button(
+                "\U0001f5d1",
+                key=key_bin,
+                width="stretch",
+                help="Supprimer ce fichier",
+            ):
+                oid = path_to_object.get(resolved)
+                if oid:
+                    st.session_state["_gcs_dlg_delete_file"] = oid
+                    st.rerun()
+
+
 
 
 def _show_pdf(path: Path) -> None:
@@ -845,7 +1033,8 @@ def main() -> None:
             else:
                 st.caption("Développez les dossiers et cliquez sur un document.")
                 with st.container(height=520, border=True):
-                    _render_file_tree(tree)
+                    _gcs_arborescence_dialogs(bucket, user_prefix)
+                    _render_file_tree(tree, bucket, user_prefix, path_map)
             st.caption(f"**{n_final}** dossiers finaux indexés")
         with right:
             _render_gcs_document_viewer(bucket)

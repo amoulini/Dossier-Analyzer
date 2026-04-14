@@ -7,6 +7,7 @@ from typing import Any
 
 from google.cloud import storage
 
+from dossier_analyzer.gcs_ops import DOSSIER_FOLDER_PLACEHOLDER
 from dossier_analyzer.scan import SUPPORTED_EXTENSIONS, TreeNode
 
 
@@ -23,8 +24,9 @@ def list_user_blob_entries(
         rel = blob.name[len(user_root) :]
         if not rel or rel.startswith("/"):
             continue
+        base_name = Path(rel).name
         ext = Path(rel).suffix.lower()
-        if ext not in SUPPORTED_EXTENSIONS:
+        if base_name != DOSSIER_FOLDER_PLACEHOLDER and ext not in SUPPORTED_EXTENSIONS:
             continue
         out.append(
             {
@@ -82,12 +84,16 @@ def build_tree_from_gcs_entries(
         node = root_trie
         for d in d_parts:
             node = node["dirs"].setdefault(d, {"dirs": {}, "files": []})
+        if fname == DOSSIER_FOLDER_PLACEHOLDER:
+            continue
         fake_file = fake_base / rel
         node["files"].append((fname, fake_file, str(e["object_name"])))
 
     path_to_object: dict[str, str] = {}
     root = TreeNode(name="Espace cloud", rel=Path("."), path=fake_base)
     for fname, fake_file, object_name in sorted(root_trie["files"], key=lambda x: x[0].lower()):
+        if fname == DOSSIER_FOLDER_PLACEHOLDER:
+            continue
         path_to_object[str(fake_file.resolve())] = object_name
         root.files.append(fake_file)
     for subname, sub in sorted(root_trie["dirs"].items(), key=lambda x: x[0].lower()):
