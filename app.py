@@ -47,6 +47,22 @@ from dossier_analyzer.scan import TreeNode, count_leaf_folders
 _CACHE_SERIAL = "dossier-analyzer-6"
 _GCS_WORKSPACE_MARKER = "__dossier_gcs_workspace__"
 _MAX_GCS_INDEX_BYTES = int(os.environ.get("GCS_MAX_INDEX_BYTES", str(50 * 1024 * 1024)))
+_DEFAULT_BATCH_UPLOAD_MB = 100
+
+
+def _gcs_batch_upload_limit_bytes() -> int:
+    """Max total size (bytes) for one multi-file upload from the tree menu."""
+    try:
+        raw = dict(st.secrets.get("gcp", {}) or {}).get("max_batch_upload_mb")
+    except Exception:
+        raw = None
+    if raw is None:
+        raw = os.environ.get("GCS_MAX_BATCH_UPLOAD_MB")
+    try:
+        mb = int(raw) if raw is not None else _DEFAULT_BATCH_UPLOAD_MB
+    except (TypeError, ValueError):
+        mb = _DEFAULT_BATCH_UPLOAD_MB
+    return max(1, mb) * 1024 * 1024
 
 # Microsoft Excel product green (#217346); applied via CSS to the sole st.download_button in this app.
 _EXCEL_EXPORT_BTN_CSS = """
@@ -727,36 +743,59 @@ def _folder_menu_popover(
             st.session_state["_gcs_dlg_delete_folder_rel"] = rel_key
             st.rerun()
 
-        st.markdown("**Envoyer un fichier**")
+        st.markdown("**Envoyer des fichiers**")
+        batch_limit = _gcs_batch_upload_limit_bytes()
+        st.caption(
+            f"Sélection multiple autorisée — taille totale max : **{batch_limit // (1024 * 1024)} Mo** "
+            "(réglage : `gcp.max_batch_upload_mb` ou `GCS_MAX_BATCH_UPLOAD_MB`)."
+        )
         up = st.file_uploader(
-            "Fichier",
+            "Fichiers",
             type=["pdf", "md", "markdown", "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif"],
+            accept_multiple_files=True,
             key=_safe_widget_key(rel_key, "gcs_f_up"),
             label_visibility="collapsed",
         )
-        if up is not None and st.button(
+        if up and st.button(
             "Envoyer vers ce dossier",
             key=_safe_widget_key(rel_key, "gcs_f_up_do"),
             width="stretch",
         ):
-            try:
-                safe_name = sanitize_upload_filename(up.name)
-                pref = folder_gcs_prefix(user_prefix, folder_node.rel)
-                object_name = f"{pref}{safe_name}"
-                ctype, _ = mimetypes.guess_type(safe_name)
-                safe_upload_bytes(
-                    client,
-                    bucket,
-                    object_name,
-                    user_prefix,
-                    up.getvalue(),
-                    ctype,
+            files = list(up)
+            total_bytes = sum(len(f.getvalue()) for f in files)
+            if total_bytes > batch_limit:
+                st.error(
+                    f"Taille totale ({total_bytes / (1024 * 1024):.1f} Mo) dépasse la limite "
+                    f"({batch_limit / (1024 * 1024):.0f} Mo). Réduisez la sélection ou augmentez la limite."
                 )
-                st.success(f"Envoyé : {safe_name}")
-                _gcs_invalidate_index()
-                st.rerun()
-            except Exception as ex:
-                st.error(str(ex))
+            else:
+                pref = folder_gcs_prefix(user_prefix, folder_node.rel)
+                ok = 0
+                err_msgs: list[str] = []
+                for f in files:
+                    try:
+                        safe_name = sanitize_upload_filename(f.name)
+                        object_name = f"{pref}{safe_name}"
+                        ctype, _ = mimetypes.guess_type(safe_name)
+                        safe_upload_bytes(
+                            client,
+                            bucket,
+                            object_name,
+                            user_prefix,
+                            f.getvalue(),
+                            ctype,
+                        )
+                        ok += 1
+                    except Exception as ex:
+                        err_msgs.append(f"{f.name}: {ex}")
+                for msg in err_msgs:
+                    st.warning(msg)
+                if ok:
+                    st.success(f"{ok} fichier(s) envoyé(s).")
+                    _gcs_invalidate_index()
+                    st.rerun()
+                elif not err_msgs:
+                    st.warning("Aucun fichier sélectionné.")
 
         st.markdown("**Nouveau sous-dossier**")
         sub = st.text_input(
