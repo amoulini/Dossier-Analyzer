@@ -845,69 +845,95 @@ def _render_keyword_inputs(client, bucket: str, user_prefix: str) -> list[Keywor
         st.warning(f"Synchronisation cloud (10 s) : {sync_err}")
 
     slug = str(st.session_state.get("kw_active_slug", DEFAULT_LIST_SLUG))
-    meta_col, desc_col = st.columns([2.8, 9.2], vertical_alignment="center", gap="small")
-    with meta_col:
-        pop_key = f"kw_lists_menu_{int(st.session_state.get(_KW_LISTS_POPOVER_EPOCH, 0))}"
-        with st.popover(
-            format_keyword_list_label(slug),
-            help="Charger ou gérer les listes de mots-clés",
-            key=pop_key,
-            type="primary",
-            use_container_width=True,
-        ):
-            _render_keyword_list_menu_content(client, bucket, user_prefix)
-    with desc_col:
-        st.caption(
-            "Saisie dynamique : "
-            "Recherche insensible à la casse, sous-chaîne dans le texte de chaque fichier (PDF, Markdown, nom pour les images). "
-            "Tri Analyse : le curseur Positif (0–5) pondère le classement (0 = pas positif, 5 = très positif). "
-        )
-
-    _init_kw_row_widgets()
-    rows = list(st.session_state.kw_rows)
+    body_col, csv_col = st.columns([4.25, 1], gap="medium", vertical_alignment="top")
     remove_id: str | None = None
-
-    for row in rows:
-        c0, c1, c2, c3 = st.columns([0.04, 3.4, 1.4, 0.55], gap="small")
-        with c0:
-            st.markdown(
-                "<div style='background:#c0392b;width:4px;height:2.6rem;border-radius:3px;margin-top:2px'></div>",
-                unsafe_allow_html=True,
-            )
-        with c1:
-            st.text_input(
-                "Mot-clé",
-                key=f"kw_{row['id']}",
-                placeholder="entrer mot clé",
-                label_visibility="collapsed",
-                on_change=_make_persist_keyword(row["id"]),
-            )
-        with c2:
-            st.slider(
-                "Positif",
-                min_value=0,
-                max_value=5,
-                step=1,
-                key=f"kw_pos_{row['id']}",
-                help="0 = pas positif … 5 = très positif — utilisé pour trier les fichiers correspondants",
-                label_visibility="collapsed",
-                on_change=_make_persist_positivity(row["id"]),
-            )
-        with c3:
-            st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
-            if st.button(
-                "🗑️",
-                key=f"del_{row['id']}",
-                help="Supprimer",
+    with body_col:
+        meta_col, desc_col = st.columns([2.8, 9.2], vertical_alignment="center", gap="small")
+        with meta_col:
+            pop_key = f"kw_lists_menu_{int(st.session_state.get(_KW_LISTS_POPOVER_EPOCH, 0))}"
+            with st.popover(
+                format_keyword_list_label(slug),
+                help="Charger ou gérer les listes de mots-clés",
+                key=pop_key,
+                type="primary",
+                use_container_width=True,
             ):
-                remove_id = row["id"]
+                _render_keyword_list_menu_content(client, bucket, user_prefix)
+        with desc_col:
+            st.caption(
+                "Saisie dynamique : "
+                "Recherche insensible à la casse, sous-chaîne dans le texte de chaque fichier (PDF, Markdown, nom pour les images). "
+                "Tri Analyse : le curseur Positif (0–5) pondère le classement (0 = pas positif, 5 = très positif). "
+            )
 
-    c_add, _ = st.columns([1, 3])
-    with c_add:
-        if st.button("➕ Ajouter mot-clé", width="stretch"):
-            new_id = uuid.uuid4().hex[:10]
-            st.session_state.kw_rows.append({"id": new_id, "text": "", "positivity": 3})
-            st.rerun()
+        _init_kw_row_widgets()
+        rows = list(st.session_state.kw_rows)
+
+        for row in rows:
+            c0, c1, c2, c3 = st.columns([0.04, 3.4, 1.4, 0.55], gap="small")
+            with c0:
+                st.markdown(
+                    "<div style='background:#c0392b;width:4px;height:2.6rem;border-radius:3px;margin-top:2px'></div>",
+                    unsafe_allow_html=True,
+                )
+            with c1:
+                st.text_input(
+                    "Mot-clé",
+                    key=f"kw_{row['id']}",
+                    placeholder="entrer mot clé",
+                    label_visibility="collapsed",
+                    on_change=_make_persist_keyword(row["id"]),
+                )
+            with c2:
+                st.slider(
+                    "Positif",
+                    min_value=0,
+                    max_value=5,
+                    step=1,
+                    key=f"kw_pos_{row['id']}",
+                    help="0 = pas positif … 5 = très positif — utilisé pour trier les fichiers correspondants",
+                    label_visibility="collapsed",
+                    on_change=_make_persist_positivity(row["id"]),
+                )
+            with c3:
+                st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+                if st.button(
+                    "🗑️",
+                    key=f"del_{row['id']}",
+                    help="Supprimer",
+                ):
+                    remove_id = row["id"]
+
+        c_add, _ = st.columns([1, 3])
+        with c_add:
+            if st.button("➕ Ajouter mot-clé", width="stretch"):
+                new_id = uuid.uuid4().hex[:10]
+                st.session_state.kw_rows.append({"id": new_id, "text": "", "positivity": 3})
+                st.rerun()
+
+    with csv_col:
+        uploaded_kw_csv = st.file_uploader(
+            "Charger depuis CSV",
+            type=["csv"],
+            key="kw_csv_uploader",
+            help="Même format que data/keywords.csv : colonnes word et grade (note 0–5). Remplace la liste active.",
+            label_visibility="visible",
+            width=200,
+        )
+        if uploaded_kw_csv is not None:
+            body = uploaded_kw_csv.getvalue()
+            digest = hashlib.sha256(body).hexdigest()
+            if st.session_state.get("_kw_csv_import_hash") != digest:
+                ok_csv, msg_csv = _apply_keywords_csv_to_session(body)
+                st.session_state["_kw_csv_import_hash"] = digest
+                if ok_csv:
+                    try:
+                        _flush_active_keyword_list_to_gcs(client, bucket, user_prefix)
+                    except Exception as ex:
+                        st.session_state["_kw_autosync_error"] = str(ex)
+                    st.rerun()
+                else:
+                    st.warning(msg_csv)
 
     if remove_id is not None:
         st.session_state.kw_rows = [r for r in st.session_state.kw_rows if r["id"] != remove_id]
@@ -1398,34 +1424,8 @@ def main() -> None:
 
     n_final = count_leaf_folders(tree) if tree else 0
 
-    col_kw, col_csv = st.columns([5, 1.2], vertical_alignment="top")
-    with col_csv:
-        st.markdown("<div style='height:0.25rem'></div>", unsafe_allow_html=True)
-        uploaded_kw_csv = st.file_uploader(
-            "Charger mots-clés depuis CSV",
-            type=["csv"],
-            key="kw_csv_uploader",
-            help="Même format que data/keywords.csv : colonnes word et grade (note 0–5). Remplace la liste active.",
-            label_visibility="visible",
-        )
-        if uploaded_kw_csv is not None:
-            body = uploaded_kw_csv.getvalue()
-            digest = hashlib.sha256(body).hexdigest()
-            if st.session_state.get("_kw_csv_import_hash") != digest:
-                ok_csv, msg_csv = _apply_keywords_csv_to_session(body)
-                st.session_state["_kw_csv_import_hash"] = digest
-                if ok_csv:
-                    try:
-                        _flush_active_keyword_list_to_gcs(client, bucket, user_prefix)
-                    except Exception as ex:
-                        st.session_state["_kw_autosync_error"] = str(ex)
-                    st.rerun()
-                else:
-                    st.warning(msg_csv)
-
-    with col_kw:
-        with st.expander("Mots-clés — analyse", expanded=True):
-            kw_entries = _render_keyword_inputs(client, bucket, user_prefix)
+    with st.expander("Mots-clés — analyse", expanded=True):
+        kw_entries = _render_keyword_inputs(client, bucket, user_prefix)
 
     tab_explorer, tab_analyse = st.tabs(["Dossiers (exploration)", "Analyse"])
 
