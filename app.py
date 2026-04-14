@@ -29,6 +29,7 @@ from dossier_analyzer.gcs_ops import (
     safe_delete_folder_prefix,
     safe_upload_bytes,
     sanitize_upload_filename,
+    user_arborescence_prefix,
 )
 from dossier_analyzer.gcs_tree import (
     build_tree_from_gcs_entries,
@@ -250,9 +251,10 @@ def file_text_index_gcs(
 
 def _default_keyword_seed_rows() -> list[dict]:
     return [
-        {"id": uuid.uuid4().hex[:10], "text": "Excellent niveau", "positivity": 5},
-        {"id": uuid.uuid4().hex[:10], "text": "Bon niveau", "positivity": 4},
-        {"id": uuid.uuid4().hex[:10], "text": "Irrégulier", "positivity": 1},
+        {"id": uuid.uuid4().hex[:10], "text": "", "positivity": 3},
+        # {"id": uuid.uuid4().hex[:10], "text": "Excellent niveau", "positivity": 5},
+        # {"id": uuid.uuid4().hex[:10], "text": "Bon niveau", "positivity": 4},
+        # {"id": uuid.uuid4().hex[:10], "text": "Irrégulier", "positivity": 1},
     ]
 
 
@@ -902,7 +904,7 @@ def _render_keyword_inputs(client, bucket: str, user_prefix: str) -> list[Keywor
 
     c_add, _ = st.columns([1, 3])
     with c_add:
-        if st.button("➕ Ajouter", width="stretch"):
+        if st.button("➕ Ajouter mot-clé", width="stretch"):
             new_id = uuid.uuid4().hex[:10]
             st.session_state.kw_rows.append({"id": new_id, "text": "", "positivity": 3})
             st.rerun()
@@ -1104,7 +1106,7 @@ def _folder_menu_popover(
         batch_limit = _gcs_batch_upload_limit_bytes()
         st.caption(
             f"Sélection multiple autorisée — taille totale max : **{batch_limit // (1024 * 1024)} Mo** "
-            "(réglage : `gcp.max_batch_upload_mb` ou `GCS_MAX_BATCH_UPLOAD_MB`)."
+            #"(réglage : `gcp.max_batch_upload_mb` ou `GCS_MAX_BATCH_UPLOAD_MB`)."
         )
         up = st.file_uploader(
             "Fichiers",
@@ -1316,9 +1318,9 @@ def _render_gcs_document_viewer(bucket: str) -> None:
 
     user_prefix = _user_storage_prefix()
     if user_prefix:
-        root_prefix = f"users/{user_prefix}/"
-        if object_name.startswith(root_prefix):
-            st.text(object_name[len(root_prefix) :])
+        arbo = user_arborescence_prefix(user_prefix)
+        if object_name.startswith(arbo):
+            st.text(object_name[len(arbo) :])
         else:
             st.text(object_name)
     else:
@@ -1433,8 +1435,7 @@ def main() -> None:
             st.markdown("### Arborescence")
             if tree is not None and not tree.children and not tree.files:
                 st.info(
-                    "Espace vide pour l’instant. Utilisez le menu \u22ee (en haut à droite, dans le cadre ci-dessous) "
-                    "pour envoyer des fichiers ou créer un dossier."
+                    "Espace vide pour l’instant."
                 )
             else:
                 st.caption("Développez les dossiers et cliquez sur un document.")

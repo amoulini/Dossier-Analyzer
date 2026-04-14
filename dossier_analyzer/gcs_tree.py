@@ -1,4 +1,4 @@
-"""Build a :class:`TreeNode` from GCS object names under ``users/<storage_id>/``."""
+"""Build a :class:`TreeNode` from GCS object names under ``users/<storage_id>/arborescence/``."""
 
 from __future__ import annotations
 
@@ -7,21 +7,25 @@ from typing import Any
 
 from google.cloud import storage
 
-from dossier_analyzer.gcs_ops import DOSSIER_FOLDER_PLACEHOLDER
+from dossier_analyzer.gcs_ops import (
+    ARBORESCENCE_DIR,
+    DOSSIER_FOLDER_PLACEHOLDER,
+    user_arborescence_prefix,
+)
 from dossier_analyzer.scan import SUPPORTED_EXTENSIONS, TreeNode
 
 
 def list_user_blob_entries(
     client: storage.Client, bucket_name: str, user_storage_prefix: str
 ) -> list[dict[str, Any]]:
-    """Metadata for supported files under the user's prefix (relative keys as posix)."""
-    user_root = f"users/{user_storage_prefix}/"
+    """Metadata for supported files under ``users/<id>/arborescence/`` (clés relatives à ce dossier)."""
+    base = user_arborescence_prefix(user_storage_prefix)
     bucket = client.bucket(bucket_name)
     out: list[dict[str, Any]] = []
-    for blob in bucket.list_blobs(prefix=user_root):
+    for blob in bucket.list_blobs(prefix=base):
         if blob.name.endswith("/"):
             continue
-        rel = blob.name[len(user_root) :]
+        rel = blob.name[len(base) :]
         if not rel or rel.startswith("/"):
             continue
         base_name = Path(rel).name
@@ -66,9 +70,16 @@ def build_tree_from_gcs_entries(
 ) -> tuple[TreeNode, dict[str, str]]:
     """
     Synthetic :class:`TreeNode` whose file paths live under
-    ``/__dossier_gcs__/<bucket>/users/<id>/…`` (paths need not exist on disk).
+    ``/__dossier_gcs__/<bucket>/users/<id>/arborescence/…`` (paths need not exist on disk).
     """
-    fake_base = Path("/") / "__dossier_gcs__" / bucket_name / "users" / user_storage_prefix
+    fake_base = (
+        Path("/")
+        / "__dossier_gcs__"
+        / bucket_name
+        / "users"
+        / user_storage_prefix
+        / ARBORESCENCE_DIR
+    )
     if not entries:
         root = TreeNode(name="Espace cloud", rel=Path("."), path=fake_base)
         return root, {}

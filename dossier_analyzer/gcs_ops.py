@@ -1,4 +1,4 @@
-"""Safe GCS mutations under ``users/<storage_id>/``."""
+"""Safe GCS mutations under ``users/<storage_id>/`` (dossier cloud sous ``arborescence/``)."""
 
 from __future__ import annotations
 
@@ -9,10 +9,16 @@ from google.api_core import exceptions as gcs_exceptions
 from google.cloud import storage
 
 DOSSIER_FOLDER_PLACEHOLDER = ".dossier_placeholder"
+ARBORESCENCE_DIR = "arborescence"
 
 
 def user_root_prefix(user_storage_prefix: str) -> str:
     return f"users/{user_storage_prefix}/"
+
+
+def user_arborescence_prefix(user_storage_prefix: str) -> str:
+    """Racine GCS du volet « Arborescence » (dossiers et fichiers du dossier cloud)."""
+    return f"{user_root_prefix(user_storage_prefix)}{ARBORESCENCE_DIR}/"
 
 
 def _normalize_folder_rel(rel: Path) -> str:
@@ -23,8 +29,8 @@ def _normalize_folder_rel(rel: Path) -> str:
 
 
 def folder_gcs_prefix(user_storage_prefix: str, folder_rel: Path) -> str:
-    """Prefix ending with ``/`` for all objects inside this virtual folder."""
-    root = user_root_prefix(user_storage_prefix)
+    """Prefix ending with ``/`` for all objects inside this virtual folder (sous ``arborescence/``)."""
+    root = user_arborescence_prefix(user_storage_prefix)
     sub = _normalize_folder_rel(folder_rel)
     if not sub:
         return root
