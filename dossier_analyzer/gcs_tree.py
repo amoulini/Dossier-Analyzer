@@ -63,15 +63,16 @@ def build_tree_from_gcs_entries(
     entries: list[dict[str, Any]],
     bucket_name: str,
     user_storage_prefix: str,
-) -> tuple[TreeNode | None, dict[str, str]]:
+) -> tuple[TreeNode, dict[str, str]]:
     """
     Synthetic :class:`TreeNode` whose file paths live under
     ``/__dossier_gcs__/<bucket>/users/<id>/…`` (paths need not exist on disk).
     """
-    if not entries:
-        return None, {}
-
     fake_base = Path("/") / "__dossier_gcs__" / bucket_name / "users" / user_storage_prefix
+    if not entries:
+        root = TreeNode(name="Espace cloud", rel=Path("."), path=fake_base)
+        return root, {}
+
     root_trie: dict[str, Any] = {"dirs": {}, "files": []}
 
     for e in entries:

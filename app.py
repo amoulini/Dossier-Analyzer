@@ -89,6 +89,14 @@ def _safe_widget_key(path_str: str, prefix: str) -> str:
     return f"{prefix}_{h}"
 
 
+_GCS_TREE_POPOVER_EPOCH = "_gcs_tree_popover_epoch"
+
+
+def _gcs_bump_tree_popover_epoch() -> None:
+    """Remount folder popovers with a new widget key so they render closed after an action."""
+    st.session_state[_GCS_TREE_POPOVER_EPOCH] = int(st.session_state.get(_GCS_TREE_POPOVER_EPOCH, 0)) + 1
+
+
 # Une couleur de fond distincte par note (0 → 5), progression chromatique rouge → vert.
 _POSITIVITY_CHIP_BG: tuple[str, ...] = (
     "#a93226",  # 0 rouge
@@ -713,6 +721,7 @@ def _gcs_arborescence_dialogs(bucket: str, user_prefix: str) -> None:
                         st.session_state.pop("_gcs_dlg_delete_folder_rel", None)
                         st.session_state.selected_file = None
                         _gcs_invalidate_index()
+                        _gcs_bump_tree_popover_epoch()
                         st.rerun()
                     except Exception as ex:
                         st.error(str(ex))
@@ -733,14 +742,17 @@ def _folder_menu_popover(
 ) -> None:
     client = _gcs_client_app()
     rel_key = folder_node.rel.as_posix()
+    pop_epoch = int(st.session_state.get(_GCS_TREE_POPOVER_EPOCH, 0))
+    pop_key = f"gcs_tree_pop_{pop_epoch}_{hashlib.sha256(rel_key.encode()).hexdigest()[:16]}"
 
-    with st.popover("\u22EE", help="Actions sur le dossier"):
+    with st.popover("\u22EE", help="Actions sur le dossier", key=pop_key):
         if allow_delete_folder and st.button(
             "Supprimer le dossier",
             key=_safe_widget_key(rel_key, "gcs_f_del"),
             width="stretch",
         ):
             st.session_state["_gcs_dlg_delete_folder_rel"] = rel_key
+            _gcs_bump_tree_popover_epoch()
             st.rerun()
 
         st.markdown("**Envoyer des fichiers**")
@@ -793,6 +805,7 @@ def _folder_menu_popover(
                 if ok:
                     st.success(f"{ok} fichier(s) envoyé(s).")
                     _gcs_invalidate_index()
+                    _gcs_bump_tree_popover_epoch()
                     st.rerun()
                 elif not err_msgs:
                     st.warning("Aucun fichier sélectionné.")
@@ -818,6 +831,7 @@ def _folder_menu_popover(
                     )
                     st.success("Dossier créé.")
                     _gcs_invalidate_index()
+                    _gcs_bump_tree_popover_epoch()
                     st.rerun()
                 except Exception as ex:
                     st.error(str(ex))
@@ -1067,12 +1081,16 @@ def main() -> None:
         left, right = st.columns([1, 2], gap="large")
         with left:
             st.markdown("### Arborescence")
-            if tree is None:
-                st.warning("Arborescence vide ou inaccessible.")
+            if tree is not None and not tree.children and not tree.files:
+                st.info(
+                    "Espace vide pour l’instant. Utilisez le menu \u22ee (en haut à droite, dans le cadre ci-dessous) "
+                    "pour envoyer des fichiers ou créer un dossier."
+                )
             else:
                 st.caption("Développez les dossiers et cliquez sur un document.")
-                with st.container(height=520, border=True):
-                    _gcs_arborescence_dialogs(bucket, user_prefix)
+            with st.container(height=520, border=True):
+                _gcs_arborescence_dialogs(bucket, user_prefix)
+                if tree is not None:
                     _render_file_tree(tree, bucket, user_prefix, path_map)
             st.caption(f"**{n_final}** dossiers finaux indexés")
         with right:
