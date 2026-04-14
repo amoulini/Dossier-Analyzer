@@ -8,6 +8,7 @@ import csv
 import hashlib
 import io
 import os
+import re
 import stat
 import sys
 import uuid
@@ -18,22 +19,24 @@ import fitz  # PyMuPDF
 import streamlit as st
 from openpyxl import Workbook
 
-from dossier_analyzer.extract import collect_all_file_paths, extract_text_for_path
+from dossier_analyzer.extract import extract_text_from_bytes
+from dossier_analyzer.gcs_tree import (
+    build_tree_from_gcs_entries,
+    gcs_index_fingerprint,
+    list_user_blob_entries,
+)
 from dossier_analyzer.match import (
     KeywordEntry,
     RankedFolderMatch,
     normalize_keyword_entries,
     ranked_folder_matches,
 )
-from dossier_analyzer.scan import (
-    SUPPORTED_EXTENSIONS,
-    TreeNode,
-    build_tree,
-    count_leaf_folders,
-)
+from dossier_analyzer.scan import TreeNode, count_leaf_folders
 
 # Pass as first arg to file_text_index so Streamlit cache keys never match stale disk entries.
-_CACHE_SERIAL = "dossier-analyzer-5"
+_CACHE_SERIAL = "dossier-analyzer-6"
+_GCS_WORKSPACE_MARKER = "__dossier_gcs_workspace__"
+_MAX_GCS_INDEX_BYTES = int(os.environ.get("GCS_MAX_INDEX_BYTES", str(50 * 1024 * 1024)))
 
 # Microsoft Excel product green (#217346); applied via CSS to the sole st.download_button in this app.
 _EXCEL_EXPORT_BTN_CSS = """
@@ -118,19 +121,74 @@ def _matches_to_excel_bytes(ranked: list[RankedFolderMatch], columns: list[Keywo
     return buf.getvalue()
 
 
-@st.cache_data(show_spinner="Indexation des fichiers…")
-def file_text_index(cache_version: str, root_str: str) -> dict[str, str]:
-    """Chemin relatif (posix) → texte extrait pour chaque fichier pris en charge sous la racine."""
-    root = Path(root_str).resolve()
-    tree = build_tree(root)
-    if tree is None:
+@st.cache_resource
+def _gcs_client_app():
+    from google.cloud import storage
+
+    return storage.Client()
+
+
+def _secrets_gcp() -> dict:
+    try:
+        raw = st.secrets.get("gcp", {})
+        return dict(raw) if raw is not None else {}
+    except Exception:
         return {}
+
+
+def _gcs_bucket_name() -> str:
+    name = str(_secrets_gcp().get("bucket_name", "") or "").strip()
+    if name:
+        return name
+    return str(os.environ.get("GCS_BUCKET_NAME", "") or "").strip()
+
+
+def _user_storage_prefix() -> str | None:
+    """Same layout as login_page: OIDC sub slug, else SHA-256 of email."""
+    try:
+        info = dict(st.user)
+    except Exception:
+        return None
+    sub = info.get("sub")
+    if sub:
+        seg = re.sub(r"[^a-zA-Z0-9._@-]", "_", str(sub).strip())[:128]
+        return seg if seg else None
+    email = info.get("email")
+    if email:
+        digest = hashlib.sha256(str(email).strip().lower().encode("utf-8")).hexdigest()
+        return f"h_{digest}"
+    return None
+
+
+def _render_login_gate() -> None:
+    st.title("Dossier Analyzer")
+    st.header("Connexion requise")
+    st.caption("Connectez-vous pour accéder à vos dossiers dans le stockage cloud.")
+    st.button("Se connecter avec Google", on_click=st.login, type="primary")
+
+
+@st.cache_data(show_spinner="Indexation des fichiers (cloud)…")
+def file_text_index_gcs(
+    cache_version: str, bucket: str, user_prefix: str, fingerprint: str
+) -> dict[str, str]:
+    """Relative object path (posix) → extracted text for supported types."""
+    del fingerprint  # part of cache key only
+    client = _gcs_client_app()
+    entries = list_user_blob_entries(client, bucket, user_prefix)
+    b = client.bucket(bucket)
     corpus: dict[str, str] = {}
-    for fpath in collect_all_file_paths(tree):
-        if fpath.suffix.lower() not in SUPPORTED_EXTENSIONS:
+    for e in entries:
+        rel = str(e["rel"])
+        blob = b.blob(str(e["object_name"]))
+        try:
+            data = blob.download_as_bytes()
+        except Exception:
             continue
-        rel = fpath.relative_to(root).as_posix()
-        corpus[rel] = extract_text_for_path(fpath)
+        if len(data) > _MAX_GCS_INDEX_BYTES:
+            continue
+        corpus[rel] = extract_text_from_bytes(
+            data, Path(rel).suffix, Path(rel).name
+        )
     return corpus
 
 
@@ -492,14 +550,13 @@ def _render_keyword_inputs() -> list[KeywordEntry]:
     ]
 
 
-def _render_match_cards(root_str: str, entries: list[KeywordEntry]) -> None:
+def _render_match_cards(corpus: dict[str, str], entries: list[KeywordEntry]) -> None:
     kws_norm = normalize_keyword_entries(entries)
     if not kws_norm:
         st.markdown("##### Fichiers correspondants")
         st.caption("Entrez au moins un mot-clé non vide ci-dessus.")
         return
 
-    corpus = file_text_index(_CACHE_SERIAL, root_str)
     ranked = ranked_folder_matches(corpus, entries)
 
     head_l, head_c, head_r = st.columns([2.8, 2.2, 1], vertical_alignment="center")
@@ -611,6 +668,22 @@ def _show_pdf(path: Path) -> None:
         doc.close()
 
 
+def _show_pdf_bytes(data: bytes) -> None:
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception as e:
+        st.error(f"Impossible d’ouvrir le PDF : {e}")
+        return
+    try:
+        for i in range(len(doc)):
+            page = doc[i]
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+            pdata = pix.tobytes("png")
+            st.image(io.BytesIO(pdata), width="stretch", caption=f"Page {i + 1} / {len(doc)}")
+    finally:
+        doc.close()
+
+
 def _show_markdown(path: Path | None, text: str | None = None) -> None:
     if text is None:
         try:
@@ -642,26 +715,46 @@ def _display_path_under_root(path: Path, browse_root: Path) -> None:
         st.text(abs_path.as_posix())
 
 
-def _render_document_viewer(browse_root: Path) -> None:
+def _render_gcs_document_viewer(bucket: str) -> None:
     st.markdown("##### Document visualizer")
     sel = st.session_state.selected_file
     if not sel:
         st.caption("Sélectionnez un fichier dans l’arborescence.")
         return
 
-    path = Path(sel).expanduser()
-    _display_path_under_root(path, browse_root)
-    if not path.is_file():
+    path_map: dict[str, str] = st.session_state.get("_gcs_path_to_object", {})
+    object_name = path_map.get(sel)
+    if not object_name:
         st.warning("Fichier introuvable.")
         return
-    suffix = path.suffix.lower()
+
+    user_prefix = _user_storage_prefix()
+    if user_prefix:
+        root_prefix = f"users/{user_prefix}/"
+        if object_name.startswith(root_prefix):
+            st.text(object_name[len(root_prefix) :])
+        else:
+            st.text(object_name)
+    else:
+        st.text(object_name)
+
+    try:
+        data = _gcs_client_app().bucket(bucket).blob(object_name).download_as_bytes()
+    except Exception as e:
+        st.error(f"Téléchargement impossible : {e}")
+        return
+    if len(data) > max(_MAX_GCS_INDEX_BYTES, 80 * 1024 * 1024):
+        st.warning("Fichier trop volumineux pour l’aperçu.")
+        return
+
+    suffix = Path(object_name).suffix.lower()
     with st.container(border=True):
         if suffix == ".pdf":
-            _show_pdf(path)
+            _show_pdf_bytes(data)
         elif suffix in {".md", ".markdown"}:
-            _show_markdown(path)
+            _show_markdown(path=None, text=data.decode("utf-8", errors="replace"))
         elif suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}:
-            _show_image(path)
+            _show_image(path=None, image_bytes=data)
         else:
             st.info("Format non pris en charge pour l’aperçu.")
 
@@ -670,36 +763,57 @@ def main() -> None:
     st.set_page_config(page_title="Dossier Analyzer", layout="wide")
     _ensure_session()
 
-    if st.session_state.browse_root is None:
-        _render_workspace_picker()
+    if not bool(getattr(st.user, "is_logged_in", False)):
+        _render_login_gate()
         st.stop()
 
-    root = Path(st.session_state.browse_root).resolve()
+    bucket = _gcs_bucket_name()
+    user_prefix = _user_storage_prefix()
+    if not bucket:
+        st.title("Dossier Analyzer")
+        st.error(
+            "Stockage cloud non configuré. Définissez `gcp.bucket_name` dans `.streamlit/secrets.toml` "
+            "ou la variable d’environnement `GCS_BUCKET_NAME`."
+        )
+        st.stop()
+    if not user_prefix:
+        st.title("Dossier Analyzer")
+        st.error("Impossible de résoudre l’identité utilisateur pour le stockage.")
+        st.stop()
+
+    if st.session_state.browse_root != _GCS_WORKSPACE_MARKER:
+        st.session_state.browse_root = _GCS_WORKSPACE_MARKER
+        st.session_state.selected_file = None
 
     st.title("Dossier Analyzer")
-    st.caption("Exploration de dossiers et analyse par mots-clés.")
+    st.caption("Exploration cloud et analyse par mots-clés.")
+
+    client = _gcs_client_app()
+    entries = list_user_blob_entries(client, bucket, user_prefix)
+    fp = gcs_index_fingerprint(entries)
+    tree, path_map = build_tree_from_gcs_entries(entries, bucket, user_prefix)
+    st.session_state["_gcs_path_to_object"] = path_map
+    corpus = file_text_index_gcs(_CACHE_SERIAL, bucket, user_prefix, fp)
+
     with st.sidebar:
-        st.markdown("### Dossier de travail")
-        st.text(str(root))
-        if st.button("Changer de dossier", use_container_width=True):
-            st.session_state.browse_root = None
-            st.session_state.selected_file = None
-            st.session_state.pop("root_path_input", None)
+        st.markdown("### Dossier cloud")
+        st.text(f"gs://{bucket}/users/{user_prefix}/")
+        if st.button(
+            "Actualiser l’index",
+            use_container_width=True,
+            help="Recharge la liste et réindexe les fichiers.",
+        ):
+            file_text_index_gcs.clear()
             st.rerun()
+        st.button("Se déconnecter", on_click=st.logout, use_container_width=True)
 
-    if not root.is_dir():
-        st.error("Le dossier de travail n’est plus accessible. Choisissez-en un autre (barre latérale).")
-        st.stop()
-
-    root_str = str(root)
-    tree = build_tree(root)
     n_final = count_leaf_folders(tree) if tree else 0
 
     col_kw, col_csv = st.columns([5, 1.2], vertical_alignment="top")
     with col_csv:
         st.markdown("<div style='height:0.25rem'></div>", unsafe_allow_html=True)
         uploaded_kw_csv = st.file_uploader(
-            "Charger CSV",
+            "Charger mots-clés depuis CSV",
             type=["csv"],
             key="kw_csv_uploader",
             help="Même format que data/keywords.csv : colonnes word et grade (note 0–5). Remplace la liste actuelle.",
@@ -734,10 +848,10 @@ def main() -> None:
                     _render_file_tree(tree)
             st.caption(f"**{n_final}** dossiers finaux indexés")
         with right:
-            _render_document_viewer(root)
+            _render_gcs_document_viewer(bucket)
 
     with tab_analyse:
-        _render_match_cards(root_str, kw_entries)
+        _render_match_cards(corpus, kw_entries)
 
 
 if __name__ == "__main__":

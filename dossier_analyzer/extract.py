@@ -23,6 +23,20 @@ def _read_pdf_text(path: Path) -> str:
     return "\n".join(parts)
 
 
+def _read_pdf_bytes(data: bytes) -> str:
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception:
+        return ""
+    parts: list[str] = []
+    try:
+        for page in doc:
+            parts.append(page.get_text() or "")
+    finally:
+        doc.close()
+    return "\n".join(parts)
+
+
 def _read_markdown(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace")
@@ -45,6 +59,24 @@ def extract_text_for_path(path: Path) -> str:
     if suffix in _IMAGE_SUFFIXES:
         # No OCR in the basic version; still expose filename for naive keyword hits.
         return f"{path.name}\n"
+    return ""
+
+
+def extract_text_from_bytes(data: bytes, suffix: str, filename: str = "") -> str:
+    """Extract plain text from file bytes (GCS / in-memory), same rules as ``extract_text_for_path``."""
+    suf = (suffix or "").lower()
+    if not data:
+        return ""
+    if suf == ".pdf":
+        return _read_pdf_bytes(data)
+    if suf in {".md", ".markdown"}:
+        try:
+            return data.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+    if suf in _IMAGE_SUFFIXES:
+        name = filename or "image"
+        return f"{name}\n"
     return ""
 
 
