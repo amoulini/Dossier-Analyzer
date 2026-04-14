@@ -77,21 +77,46 @@ def _gcs_batch_upload_limit_bytes() -> int:
         mb = _DEFAULT_BATCH_UPLOAD_MB
     return max(1, mb) * 1024 * 1024
 
-# Microsoft Excel product green (#217346); applied via CSS to the sole st.download_button in this app.
+# Microsoft Excel product green (#217346); scoped to key ``export_matches_xlsx`` (class ``st-key-export_matches_xlsx``).
 _EXCEL_EXPORT_BTN_CSS = """
 <style>
-    div[data-testid="stDownloadButton"] button {
+    div.st-key-export_matches_xlsx[data-testid="stDownloadButton"] button,
+    div.st-key-export_matches_xlsx button {
         background-color: rgb(33, 115, 70) !important;
         border: 1px solid rgb(27, 95, 59) !important;
         color: rgb(255, 255, 255) !important;
     }
-    div[data-testid="stDownloadButton"] button:hover {
+    div.st-key-export_matches_xlsx[data-testid="stDownloadButton"] button:hover,
+    div.st-key-export_matches_xlsx button:hover {
         background-color: rgb(27, 95, 59) !important;
         border-color: rgb(22, 80, 50) !important;
         color: rgb(255, 255, 255) !important;
     }
-    div[data-testid="stDownloadButton"] button:focus-visible {
+    div.st-key-export_matches_xlsx[data-testid="stDownloadButton"] button:focus-visible,
+    div.st-key-export_matches_xlsx button:focus-visible {
         box-shadow: rgb(255, 255, 255) 0px 0px 0px 2px, rgb(33, 115, 70) 0px 0px 0px 4px !important;
+    }
+</style>
+"""
+
+# Bleu distinct pour l’export CSV des mots-clés (key ``kw_csv_export_btn``).
+_KW_CSV_EXPORT_BTN_CSS = """
+<style>
+    div.st-key-kw_csv_export_btn[data-testid="stDownloadButton"] button,
+    div.st-key-kw_csv_export_btn button {
+        background-color: rgb(30, 64, 175) !important;
+        border: 1px solid rgb(30, 58, 138) !important;
+        color: rgb(255, 255, 255) !important;
+    }
+    div.st-key-kw_csv_export_btn[data-testid="stDownloadButton"] button:hover,
+    div.st-key-kw_csv_export_btn button:hover {
+        background-color: rgb(30, 58, 138) !important;
+        border-color: rgb(23, 37, 84) !important;
+        color: rgb(255, 255, 255) !important;
+    }
+    div.st-key-kw_csv_export_btn[data-testid="stDownloadButton"] button:focus-visible,
+    div.st-key-kw_csv_export_btn button:focus-visible {
+        box-shadow: rgb(255, 255, 255) 0px 0px 0px 2px, rgb(37, 99, 235) 0px 0px 0px 4px !important;
     }
 </style>
 """
@@ -499,6 +524,13 @@ def _apply_keywords_csv_to_session(raw: bytes) -> tuple[bool, str]:
     if not new_rows:
         return True, "Liste vide (aucun mot-clé)."
     return True, f"{len(new_rows)} mot(s)-clé chargé(s)."
+
+
+def _export_current_keywords_csv_bytes() -> bytes:
+    """Exporte la liste active (widgets + ``kw_rows``) au même format que ``data/keywords.csv``."""
+    _sync_kw_rows_from_widget_session_state()
+    rows = _keyword_rows_snapshot_for_upload()
+    return _kw_rows_to_csv_bytes(rows)
 
 
 def _kw_rows_to_csv_bytes(rows: list[dict]) -> bytes:
@@ -912,8 +944,21 @@ def _render_keyword_inputs(client, bucket: str, user_prefix: str) -> list[Keywor
                 st.rerun()
 
     with csv_col:
+        st.markdown(_KW_CSV_EXPORT_BTN_CSS, unsafe_allow_html=True)
+        active_kw_slug = str(st.session_state.get("kw_active_slug", DEFAULT_LIST_SLUG))
+        export_name = f"keywords_{active_kw_slug}.csv"
+        st.download_button(
+            "Exporter vers CSV",
+            data=_export_current_keywords_csv_bytes(),
+            file_name=export_name,
+            mime="text/csv; charset=utf-8",
+            key="kw_csv_export_btn",
+            use_container_width=True,
+            width=200,
+            help="Même format que data/keywords.csv (colonnes word, grade).",
+        )
         uploaded_kw_csv = st.file_uploader(
-            "Charger depuis CSV",
+            "Charger mots-clés depuis CSV",
             type=["csv"],
             key="kw_csv_uploader",
             help="Même format que data/keywords.csv : colonnes word et grade (note 0–5). Remplace la liste active.",
