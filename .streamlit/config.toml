@@ -25,6 +25,4 @@ textColor = "rgb(51, 65, 85)"
 # Links and inline accents harmonize with primary (#0d9488)
 linkColor = "rgb(13, 148, 136)"
 
-excelColor = "rgb(33, 115, 70)"
-
 font = "sans serif"

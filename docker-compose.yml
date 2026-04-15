@@ -1,10 +1,25 @@
+# Local development only. Production on Cloud Run: use the attached service account on the
+# Cloud Run revision (roles on your GCS bucket). Do not set GOOGLE_APPLICATION_CREDENTIALS there.
+#
+# Local setup:
+# 1. Service account key JSON with bucket access → ./gcp-service-account.json (or GCP_SERVICE_ACCOUNT_JSON in .env)
+# 2. GCS_BUCKET_NAME in .env
+# 3. Optional: uncomment secrets.toml mount for Streamlit Google Sign-In
+#
+# Cloud Run (summary): deploy this image; set env GCS_BUCKET_NAME; assign a service account with
+# storage access; add OAuth redirect URI for your Cloud Run URL in Google Cloud Console.
+#
+# OAuth without mounting secrets.toml: set STREAMLIT_AUTH_REDIRECT_URI (…/oauth2callback),
+# STREAMLIT_AUTH_COOKIE_SECRET, STREAMLIT_AUTH_CLIENT_ID, STREAMLIT_AUTH_CLIENT_SECRET
+# (or GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET). streamlit_entry.py writes .streamlit/secrets.toml at boot.
+#
+# Then (local): docker compose up --build
+
 services:
   dossier-analyzer:
     build: .
     ports:
       - "8501:8501"
     environment:
-      DOSSIER_ANALYZER_ROOT: /data
-    volumes:
-      - ./data:/data:ro
+      PORT: "8501"
     restart: unless-stopped

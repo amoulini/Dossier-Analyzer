@@ -1,6 +1,7 @@
 data
 debug
 secrets.toml
+.env
 
 # Python-generated files
 __pycache__/
