@@ -4,6 +4,9 @@ Cloud Run and other hosts often inject OAuth and GCP settings as env vars instea
 ``.streamlit/secrets.toml``. Streamlit's ``st.login`` still expects ``[auth]`` in that file, so
 this script writes it (and optional ``[gcp]``) before starting Streamlit.
 
+Whenever this script generates ``secrets.toml``, it **replaces** the file entirely (atomic write),
+so a baked-in or volume-mounted copy never wins over the current environment.
+
 Auth (Google OIDC) — set these when using ``st.login`` without a secrets file:
   STREAMLIT_AUTH_REDIRECT_URI e.g. https://YOUR-SERVICE-XXXX.run.app/oauth2callback
   STREAMLIT_AUTH_COOKIE_SECRET  long random string (store in Secret Manager on Cloud Run)
@@ -19,8 +22,10 @@ Fallback names if the STREAMLIT_AUTH_* vars are unset:
 GCP section (optional; app also reads GCS_BUCKET_NAME from the environment directly):
   GCS_BUCKET_NAME, GCS_MAX_BATCH_UPLOAD_MB
 
-If ``STREAMLIT_AUTH_CLIENT_ID`` / ``GOOGLE_CLIENT_ID`` is unset, no file is written and any
-existing ``.streamlit/secrets.toml`` (e.g. local dev) is left unchanged.
+``STREAMLIT_SECRETS_FROM_ENV`` (``1`` / ``true`` / ``yes``): require a generated file at startup.
+ With full OAuth env: write ``[auth]`` and optional ``[gcp]``.
+  Without OAuth but with ``GCS_BUCKET_NAME`` or ``GCS_MAX_BATCH_UPLOAD_MB``: write ``[gcp]`` only.
+If unset and OAuth client id is absent, any existing ``.streamlit/secrets.toml`` is left unchanged.
 """
 
 from __future__ import annotations
@@ -42,14 +47,47 @@ def _toml_basic_str(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _write_secrets_toml(path: Path) -> None:
+def _gcp_section_lines() -> list[str]:
+    bucket = _e("GCS_BUCKET_NAME")
+    max_batch = (os.environ.get("GCS_MAX_BATCH_UPLOAD_MB") or "").strip()
+    if not bucket and not max_batch:
+        return []
+    lines = ["", "[gcp]"]
+    if bucket:
+        lines.append(f"bucket_name = {_toml_basic_str(bucket)}")
+    if max_batch:
+        try:
+            lines.append(f"max_batch_upload_mb = {int(max_batch)}")
+        except ValueError:
+            pass
+    return lines
+
+
+def _atomic_replace_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _sync_secrets_toml_from_env(path: Path, *, force: bool) -> None:
+    """Build ``secrets.toml`` from the environment and replace ``path`` (no merge with old file)."""
+    header = "# Generated at container start from environment variables — do not commit."
+
     redirect = _e(
         "STREAMLIT_AUTH_REDIRECT_URI",
         "AUTH_REDIRECT_URI",
     )
     cookie = _e(
-        "STREAMLIT_AUTH_COOKIE_SECRET", 
-        "AUTH_COOKIE_SECRET"
+        "STREAMLIT_AUTH_COOKIE_SECRET",
+        "AUTH_COOKIE_SECRET",
     )
     client_id = _e(
         "STREAMLIT_AUTH_CLIENT_ID",
@@ -63,48 +101,46 @@ def _write_secrets_toml(path: Path) -> None:
         "STREAMLIT_AUTH_SERVER_METADATA_URL",
     ) or "https://accounts.google.com/.well-known/openid-configuration"
 
-    if not client_id:
+    if client_id:
+        missing = [n for n, v in [
+            ("STREAMLIT_AUTH_REDIRECT_URI or AUTH_REDIRECT_URI", redirect),
+            ("STREAMLIT_AUTH_COOKIE_SECRET or AUTH_COOKIE_SECRET", cookie),
+            ("STREAMLIT_AUTH_CLIENT_ID or GOOGLE_CLIENT_ID", client_id),
+            ("STREAMLIT_AUTH_CLIENT_SECRET or GOOGLE_CLIENT_SECRET", client_secret),
+        ] if not v]
+        if missing:
+            sys.stderr.write(
+                "streamlit_entry: OAuth enabled via client id but missing: "
+                + ", ".join(missing)
+                + "\n",
+            )
+            sys.exit(1)
+
+        lines = [
+            header,
+            "[auth]",
+            f"redirect_uri = {_toml_basic_str(redirect)}",
+            f"cookie_secret = {_toml_basic_str(cookie)}",
+            f"client_id = {_toml_basic_str(client_id)}",
+            f"client_secret = {_toml_basic_str(client_secret)}",
+            f"server_metadata_url = {_toml_basic_str(meta)}",
+        ]
+        lines.extend(_gcp_section_lines())
+        _atomic_replace_text(path, "\n".join(lines) + "\n")
         return
 
-    missing = [n for n, v in [
-        ("STREAMLIT_AUTH_REDIRECT_URI or AUTH_REDIRECT_URI", redirect),
-        ("STREAMLIT_AUTH_COOKIE_SECRET or AUTH_COOKIE_SECRET", cookie),
-        ("STREAMLIT_AUTH_CLIENT_ID or GOOGLE_CLIENT_ID", client_id),
-        ("STREAMLIT_AUTH_CLIENT_SECRET or GOOGLE_CLIENT_SECRET", client_secret),
-    ] if not v]
-    if missing:
+    gcp_only = _gcp_section_lines()
+    if force and gcp_only:
+        lines = [header, *gcp_only]
+        _atomic_replace_text(path, "\n".join(lines) + "\n")
+        return
+
+    if force:
         sys.stderr.write(
-            "streamlit_entry: OAuth enabled via client id but missing: "
-            + ", ".join(missing)
-            + "\n",
+            "streamlit_entry: STREAMLIT_SECRETS_FROM_ENV is set but no OAuth client id "
+            "and no GCS_BUCKET_NAME / GCS_MAX_BATCH_UPLOAD_MB to write [gcp].\n",
         )
         sys.exit(1)
-
-    lines = [
-        "# Generated at container start from environment variables — do not commit.",
-        "[auth]",
-        f"redirect_uri = {_toml_basic_str(redirect)}",
-        f"cookie_secret = {_toml_basic_str(cookie)}",
-        f"client_id = {_toml_basic_str(client_id)}",
-        f"client_secret = {_toml_basic_str(client_secret)}",
-        f"server_metadata_url = {_toml_basic_str(meta)}",
-    ]
-
-    bucket = _e("GCS_BUCKET_NAME")
-    max_batch = (os.environ.get("GCS_MAX_BATCH_UPLOAD_MB") or "").strip()
-    if bucket or max_batch:
-        lines.append("")
-        lines.append("[gcp]")
-        if bucket:
-            lines.append(f"bucket_name = {_toml_basic_str(bucket)}")
-        if max_batch:
-            try:
-                lines.append(f"max_batch_upload_mb = {int(max_batch)}")
-            except ValueError:
-                pass
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> None:
@@ -118,16 +154,11 @@ def main() -> None:
         "yes",
     )
     has_oauth_env = bool(_e("STREAMLIT_AUTH_CLIENT_ID", "GOOGLE_CLIENT_ID"))
-    if force and not has_oauth_env:
-        sys.stderr.write(
-            "streamlit_entry: STREAMLIT_SECRETS_FROM_ENV is set but "
-            "STREAMLIT_AUTH_CLIENT_ID / GOOGLE_CLIENT_ID is missing.\n",
-        )
-        sys.exit(1)
-    if has_oauth_env:
-        _write_secrets_toml(secrets_path)
 
-    port = (os.environ.get("PORT") or "8501").strip()
+    if force or has_oauth_env:
+        _sync_secrets_toml_from_env(secrets_path, force=force)
+
+    port = (os.environ.get("PORT") or "8080").strip()
     argv = [
         sys.executable,
         "-m",

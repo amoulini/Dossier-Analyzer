@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PATH="/app/.venv/bin:${PATH}" \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
-    PORT=8501
+    PORT=8080
 
 RUN pip install --no-cache-dir uv
 
@@ -23,6 +23,6 @@ RUN uv sync --frozen --no-dev
 COPY app.py streamlit_entry.py ./
 COPY .streamlit/config.toml ./.streamlit/config.toml
 
-EXPOSE 8080 8501
+EXPOSE 8080
 
 CMD ["python", "streamlit_entry.py"]

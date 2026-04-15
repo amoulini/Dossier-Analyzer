@@ -19,7 +19,7 @@ services:
   dossier-analyzer:
     build: .
     ports:
-      - "8501:8501"
+      - "8080:8080"
     environment:
-      PORT: "8501"
+      PORT: "8080"
     restart: unless-stopped
