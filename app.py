@@ -141,21 +141,26 @@ def _bump_kw_lists_popover_epoch() -> None:
     st.session_state[_KW_LISTS_POPOVER_EPOCH] = int(st.session_state.get(_KW_LISTS_POPOVER_EPOCH, 0)) + 1
 
 
-# Une couleur de fond distincte par note (0 → 5), progression chromatique rouge → vert.
+# Une couleur de fond par note −5…+5 (index = grade + 5), rouge → gris neutre → vert.
 _POSITIVITY_CHIP_BG: tuple[str, ...] = (
-    "#a93226",  # 0 rouge
-    "#cb4335",  # 1 rouge brique
-    "#e67e22",  # 2 orange
-    "#d4ac0d",  # 3 or / jaune soutenu
-    "#28b463",  # 4 vert clair
-    "#1e8449",  # 5 vert
+    "#5c1010",  # −5
+    "#7b241c",  # −4
+    "#a93226",  # −3
+    "#cb4335",  # −2
+    "#e59866",  # −1
+    "#aeb6bf",  # 0 neutre
+    "#7dcea0",  # +1
+    "#52be80",  # +2
+    "#28b463",  # +3
+    "#1e8449",  # +4
+    "#145a32",  # +5
 )
 
 
 def _positivity_chip_colors(grade: int) -> tuple[str, str]:
-    """Fond et texte pour une pastille : teinte fixe par note de 0 à 5 (rouge → vert)."""
-    p = max(0, min(5, int(grade)))
-    bg = _POSITIVITY_CHIP_BG[p]
+    """Fond et texte pour une pastille : teinte fixe par note −5 à +5 (rouge → gris → vert)."""
+    p = max(-5, min(5, int(grade)))
+    bg = _POSITIVITY_CHIP_BG[p + 5]
     hx = bg.removeprefix("#")
     rr = int(hx[0:2], 16)
     gg = int(hx[2:4], 16)
@@ -184,13 +189,13 @@ def _matches_to_excel_bytes(ranked: list[RankedFolderMatch], columns: list[Keywo
     ws.title = "Analyse"
     headers = [e.text for e in columns]
     ws.append(["Fichier", *headers])
-    ws.append(["Positivité (0–5)", *[str(e.positivity) for e in columns]])
+    ws.append(["Note (−5 à +5)", *[str(e.positivity) for e in columns]])
     for row in ranked:
         hits = dict(row.keyword_hits)
         ws.append([row.folder_key] + [hits.get(kw, 0) for kw in headers])
 
     ws_kw = wb.create_sheet("Mots-clés — positivité", 1)
-    ws_kw.append(["Mot-clé", "Positivité (0–5)"])
+    ws_kw.append(["Mot-clé", "Note (−5 à +5)"])
     for e in sorted(columns, key=lambda x: (-x.positivity, x.text.lower())):
         ws_kw.append([e.text, e.positivity])
 
@@ -275,8 +280,8 @@ def file_text_index_gcs(
 def _default_keyword_seed_rows() -> list[dict]:
     return [
         {"id": uuid.uuid4().hex[:10], "text": "Excellent niveau", "positivity": 5},
-        {"id": uuid.uuid4().hex[:10], "text": "Bon niveau", "positivity": 4},
-        {"id": uuid.uuid4().hex[:10], "text": "Irrégulier", "positivity": 1},
+        {"id": uuid.uuid4().hex[:10], "text": "Bon niveau", "positivity": 3},
+        {"id": uuid.uuid4().hex[:10], "text": "Irrégulier", "positivity": -2},
     ]
 
 
@@ -291,11 +296,11 @@ def _ensure_session() -> None:
         st.session_state.kw_rows = _default_keyword_seed_rows()
     for r in st.session_state.kw_rows:
         if "positivity" not in r:
-            r["positivity"] = 3
+            r["positivity"] = 0
 
 
 def _apply_keywords_csv_to_session(raw: bytes) -> tuple[bool, str]:
-    """Remplace les mots-clés par le contenu d’un CSV type data/keywords.csv (mot, note 0–5)."""
+    """Remplace les mots-clés par le contenu d’un CSV type data/keywords.csv (mot, note −5 à +5)."""
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -327,7 +332,7 @@ def _apply_keywords_csv_to_session(raw: bytes) -> tuple[bool, str]:
     if grade_col is None:
         grade_col = cols[1] if len(cols) >= 2 else None
     if grade_col is None:
-        return False, "Deux colonnes attendues : mot-clé et note (0–5)."
+        return False, "Deux colonnes attendues : mot-clé et note (−5 à +5)."
 
     new_rows: list[dict] = []
     for row in reader:
@@ -336,10 +341,10 @@ def _apply_keywords_csv_to_session(raw: bytes) -> tuple[bool, str]:
             continue
         raw_g = str(row.get(grade_col, "") or "").strip().replace(",", ".")
         try:
-            g = int(float(raw_g)) if raw_g else 3
+            g = int(float(raw_g)) if raw_g else 0
         except ValueError:
-            g = 3
-        g = max(0, min(5, g))
+            g = 0
+        g = max(-5, min(5, g))
         new_rows.append({"id": uuid.uuid4().hex[:10], "text": w, "positivity": g})
 
     for r in st.session_state.kw_rows:
@@ -370,10 +375,10 @@ def _kw_rows_to_csv_bytes(rows: list[dict]) -> bytes:
         if not text:
             continue
         try:
-            g = int(r.get("positivity", 3))
+            g = int(r.get("positivity", 0))
         except (TypeError, ValueError):
-            g = 3
-        g = max(0, min(5, g))
+            g = 0
+        g = max(-5, min(5, g))
         writer.writerow([text, g])
     return buf.getvalue().encode("utf-8-sig")
 
@@ -393,7 +398,7 @@ def _sync_kw_rows_from_widget_session_state() -> None:
             try:
                 row["positivity"] = int(st.session_state[pk])
             except (TypeError, ValueError):
-                row["positivity"] = 3
+                row["positivity"] = 0
 
 
 def _keyword_rows_snapshot_for_upload() -> list[dict]:
@@ -405,10 +410,10 @@ def _keyword_rows_snapshot_for_upload() -> list[dict]:
         pk = f"kw_pos_{rid}"
         text = str(st.session_state.get(wk, r.get("text", "")) or "")
         try:
-            pos = int(st.session_state.get(pk, r.get("positivity", 3)))
+            pos = int(st.session_state.get(pk, r.get("positivity", 0)))
         except (TypeError, ValueError):
-            pos = 3
-        pos = max(0, min(5, pos))
+            pos = 0
+        pos = max(-5, min(5, pos))
         out.append({"id": rid, "text": text, "positivity": pos})
     return out
 
@@ -665,7 +670,7 @@ def _init_kw_row_widgets() -> None:
         if wk not in st.session_state:
             st.session_state[wk] = row["text"]
         if pk not in st.session_state:
-            st.session_state[pk] = int(row.get("positivity", 3))
+            st.session_state[pk] = int(row.get("positivity", 0))
 
 
 def _make_persist_keyword(row_id: str):
@@ -683,7 +688,7 @@ def _make_persist_keyword(row_id: str):
 def _make_persist_positivity(row_id: str):
     def _persist() -> None:
         pk = f"kw_pos_{row_id}"
-        val = int(st.session_state.get(pk, 3))
+        val = int(st.session_state.get(pk, 0))
         for r in st.session_state.kw_rows:
             if r["id"] == row_id:
                 r["positivity"] = val
@@ -722,7 +727,7 @@ def _render_keyword_inputs(client, bucket: str, user_prefix: str) -> list[Keywor
             st.caption(
                 "Saisie dynamique : "
                 "Recherche insensible à la casse, sous-chaîne dans le texte de chaque fichier (PDF, Markdown, nom pour les images). "
-                "Tri Analyse : le curseur Positif (0–5) pondère le classement (0 = pas positif, 5 = très positif). "
+                "Tri Analyse : le curseur Note (−5 à +5) pondère le classement (−5 = très défavorable, +5 = très favorable). "
             )
 
         _init_kw_row_widgets()
@@ -745,12 +750,12 @@ def _render_keyword_inputs(client, bucket: str, user_prefix: str) -> list[Keywor
                 )
             with c2:
                 st.slider(
-                    "Positif",
-                    min_value=0,
+                    "Note",
+                    min_value=-5,
                     max_value=5,
                     step=1,
                     key=f"kw_pos_{row['id']}",
-                    help="0 = pas positif … 5 = très positif — utilisé pour trier les fichiers correspondants",
+                    help="−5 = très défavorable … +5 = très favorable — utilisé pour trier les fichiers correspondants",
                     label_visibility="collapsed",
                     on_change=_make_persist_positivity(row["id"]),
                 )
@@ -767,7 +772,7 @@ def _render_keyword_inputs(client, bucket: str, user_prefix: str) -> list[Keywor
         with c_add:
             if st.button("➕ Ajouter mot-clé", width="stretch"):
                 new_id = uuid.uuid4().hex[:10]
-                st.session_state.kw_rows.append({"id": new_id, "text": "", "positivity": 3})
+                st.session_state.kw_rows.append({"id": new_id, "text": "", "positivity": 0})
                 st.rerun()
 
     with csv_col:
@@ -788,7 +793,7 @@ def _render_keyword_inputs(client, bucket: str, user_prefix: str) -> list[Keywor
             "Charger mots-clés depuis CSV",
             type=["csv"],
             key="kw_csv_uploader",
-            help="Remplace la liste active. Format du CSV: 2 colonnes 'word' et 'grade' (note 0–5), première ligne pour les en-têtes, pas de ligne vide, ',' comme séparateur.",
+            help="Remplace la liste active. Format du CSV: 2 colonnes 'word' et 'grade' (note −5 à +5), première ligne pour les en-têtes, pas de ligne vide, ',' comme séparateur.",
             label_visibility="visible",
             width=200,
         )
@@ -825,7 +830,7 @@ def _render_keyword_inputs(client, bucket: str, user_prefix: str) -> list[Keywor
     return [
         KeywordEntry(
             str(st.session_state.get(f"kw_{r['id']}", "") or ""),
-            int(st.session_state.get(f"kw_pos_{r['id']}", r.get("positivity", 3))),
+            int(st.session_state.get(f"kw_pos_{r['id']}", r.get("positivity", 0))),
         )
         for r in st.session_state.kw_rows
     ]
@@ -887,7 +892,7 @@ def _render_match_cards(corpus: dict[str, str], entries: list[KeywordEntry]) -> 
         if row.keyword_hits:
             chip_parts: list[str] = []
             for kw, cnt in row.keyword_hits:
-                bg, fg = _positivity_chip_colors(pos_by_kw.get(kw, 3))
+                bg, fg = _positivity_chip_colors(pos_by_kw.get(kw, 0))
                 chip_parts.append(
                     f"<span style='display:inline-block;margin:2px 6px 2px 0;padding:2px 10px;"
                     f"background:{bg};color:{fg};border-radius:999px;font-size:0.9em;"

@@ -7,15 +7,15 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class KeywordEntry:
-    """One search keyword and its positivity grade (0 = not positive … 5 = very positive)."""
+    """One search keyword and its grade in −5…+5 (negative = unfavorable, positive = favorable)."""
 
     text: str
-    positivity: int = 3
+    positivity: int = 0
 
     def __post_init__(self) -> None:
         p = int(self.positivity)
-        if p < 0:
-            p = 0
+        if p < -5:
+            p = -5
         elif p > 5:
             p = 5
         object.__setattr__(self, "positivity", p)
