@@ -278,9 +278,10 @@ def file_text_index_gcs(
 
 
 def _default_keyword_seed_rows() -> list[dict]:
+    """Liste initiale (nouveau compte / premier CSV cloud) : exemples sur l’échelle −5…+5 (0 = neutre)."""
     return [
         {"id": uuid.uuid4().hex[:10], "text": "Excellent niveau", "positivity": 5},
-        {"id": uuid.uuid4().hex[:10], "text": "Bon niveau", "positivity": 3},
+        {"id": uuid.uuid4().hex[:10], "text": "Bon niveau", "positivity": 2},
         {"id": uuid.uuid4().hex[:10], "text": "Irrégulier", "positivity": -2},
     ]
 
