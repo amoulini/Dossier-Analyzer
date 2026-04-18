@@ -77,8 +77,8 @@ class RankedFolderMatch:
     distinct_match_count: int
     #: sum(weight(kw) * count) / total_occurrences — higher when top-ranked keywords dominate
     weighted_rank_avg: float
-    #: sum(positivity(kw) * count) / total_occurrences — average positivity per hit (0..5)
-    positivity_weighted_avg: float
+    #: sum(positivity(kw) * count) — total of keyword grades over all occurrences
+    grade_sum: int
 
     @property
     def matched_keywords(self) -> list[str]:
@@ -91,7 +91,7 @@ def ranked_folder_matches(
 ) -> list[RankedFolderMatch]:
     """
     Match folders, then sort by:
-    1. positivity_weighted_avg descending (matches on more positive keywords rank higher),
+    1. grade_sum descending (sum of each keyword's grade × occurrence count),
     2. total_occurrences descending,
     3. distinct_match_count descending,
     4. weighted_rank_avg descending (keywords higher in the list weigh more per occurrence),
@@ -120,7 +120,7 @@ def ranked_folder_matches(
         total_occ = sum(c for _, c in tup)
         distinct = len(tup)
         weighted = sum(weights[kw] * c for kw, c in tup) / total_occ
-        pos_avg = sum(pos_by_kw[kw] * c for kw, c in tup) / total_occ
+        gsum = sum(pos_by_kw[kw] * c for kw, c in tup)
         rows.append(
             RankedFolderMatch(
                 folder_key=folder,
@@ -128,13 +128,13 @@ def ranked_folder_matches(
                 total_occurrences=total_occ,
                 distinct_match_count=distinct,
                 weighted_rank_avg=weighted,
-                positivity_weighted_avg=pos_avg,
+                grade_sum=gsum,
             )
         )
 
     rows.sort(
         key=lambda r: (
-            -r.positivity_weighted_avg,
+            -r.grade_sum,
             -r.total_occurrences,
             -r.distinct_match_count,
             -r.weighted_rank_avg,

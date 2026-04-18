@@ -173,7 +173,7 @@ def _empty_ranked_row(folder_key: str) -> RankedFolderMatch:
         total_occurrences=0,
         distinct_match_count=0,
         weighted_rank_avg=0.0,
-        positivity_weighted_avg=0.0,
+        grade_sum=0,
     )
 
 
