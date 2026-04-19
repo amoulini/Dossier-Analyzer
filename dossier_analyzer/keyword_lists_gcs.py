@@ -32,16 +32,22 @@ def keyword_lists_prefix(user_storage_prefix: str) -> str:
 
 
 def sanitize_keyword_list_slug(raw: str) -> str:
-    """Lowercase slug safe for object names: ``[a-z0-9][a-z0-9._-]*``."""
+    """Normalize a list name for storage as a ``.csv`` object name (lowercase, spaces allowed)."""
     s = str(raw).strip().lower()
+    s = re.sub(r" +", " ", s)
     if not s:
         raise ValueError("Nom de liste requis.")
     if len(s) > 64:
         raise ValueError("Nom trop long (64 caractères max).")
-    if not re.match(r"^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$", s):
+    if len(s) == 1:
+        if not re.match(r"^[a-z0-9]$", s):
+            raise ValueError(
+                "Un seul caractère autorisé : lettre minuscule ou chiffre."
+            )
+    elif not re.match(r"^[a-z0-9][a-z0-9. _-]*[a-z0-9]$", s):
         raise ValueError(
-            "Utilisez des lettres minuscules, chiffres, points, tirets et underscores "
-            "(lettre ou chiffre en premier et en dernier)."
+            "Utilisez des lettres minuscules, chiffres, espaces, points, tirets et underscores "
+            "(le nom doit commencer et se terminer par une lettre ou un chiffre)."
         )
     return s
 
