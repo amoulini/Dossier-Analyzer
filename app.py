@@ -168,6 +168,12 @@ def _safe_widget_key(path_str: str, prefix: str) -> str:
 
 _GCS_TREE_POPOVER_EPOCH = "_gcs_tree_popover_epoch"
 
+# Folder menu: ``st.popover`` inside the fixed-height arborescence panel was clipped; use ``st.dialog``.
+_SESSION_FOLDER_MENU_REL = "_gcs_folder_menu_rel"
+_SESSION_TREE_ROOT = "_gcs_tree_root"
+_SESSION_FOLDER_MENU_BUCKET = "_gcs_folder_menu_bucket"
+_SESSION_FOLDER_MENU_USER_PREFIX = "_gcs_folder_menu_user_prefix"
+
 
 def _gcs_bump_tree_popover_epoch() -> None:
     """Remount folder popovers with a new widget key so they render closed after an action."""
@@ -1056,7 +1062,21 @@ def _gcs_arborescence_dialogs(bucket: str, user_prefix: str) -> None:
         _confirm_folder_delete()
 
 
-def _folder_menu_popover(
+def _find_tree_node_by_rel(root: TreeNode, rel_posix: str) -> TreeNode | None:
+    if root.rel.as_posix() == rel_posix:
+        return root
+    for ch in root.children:
+        found = _find_tree_node_by_rel(ch, rel_posix)
+        if found is not None:
+            return found
+    return None
+
+
+def _dismiss_folder_menu() -> None:
+    st.session_state.pop(_SESSION_FOLDER_MENU_REL, None)
+
+
+def _render_folder_menu_content(
     folder_node: TreeNode,
     bucket: str,
     user_prefix: str,
@@ -1065,99 +1085,140 @@ def _folder_menu_popover(
 ) -> None:
     client = _gcs_client_app()
     rel_key = folder_node.rel.as_posix()
-    pop_epoch = int(st.session_state.get(_GCS_TREE_POPOVER_EPOCH, 0))
-    pop_key = f"gcs_tree_pop_{pop_epoch}_{hashlib.sha256(rel_key.encode()).hexdigest()[:16]}"
 
-    with st.popover("\u22EE", help="Actions sur le dossier", key=pop_key):
-        if allow_delete_folder and st.button(
-            "Supprimer le dossier",
-            key=_safe_widget_key(rel_key, "gcs_f_del"),
-            width="stretch",
-        ):
-            st.session_state["_gcs_dlg_delete_folder_rel"] = rel_key
-            _gcs_bump_tree_popover_epoch()
-            st.rerun()
+    if allow_delete_folder and st.button(
+        "Supprimer le dossier",
+        key=_safe_widget_key(rel_key, "gcs_f_del"),
+        width="stretch",
+    ):
+        st.session_state["_gcs_dlg_delete_folder_rel"] = rel_key
+        _dismiss_folder_menu()
+        _gcs_bump_tree_popover_epoch()
+        st.rerun()
 
-        st.markdown("**Envoyer des fichiers**")
-        batch_limit = _gcs_batch_upload_limit_bytes()
-        st.caption(
-            f"Sélection multiple autorisée — taille totale max : **{batch_limit // (1024 * 1024)} Mo** "
-            #"(réglage : `gcp.max_batch_upload_mb` ou `GCS_MAX_BATCH_UPLOAD_MB`)."
-        )
-        up = st.file_uploader(
-            "Fichiers",
-            type=["pdf", "md", "markdown", "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif"],
-            accept_multiple_files=True,
-            key=_safe_widget_key(rel_key, "gcs_f_up"),
-            label_visibility="collapsed",
-        )
-        if up and st.button(
-            "Envoyer vers ce dossier",
-            key=_safe_widget_key(rel_key, "gcs_f_up_do"),
-            width="stretch",
-        ):
-            files = list(up)
-            total_bytes = sum(len(f.getvalue()) for f in files)
-            if total_bytes > batch_limit:
-                st.error(
-                    f"Taille totale ({total_bytes / (1024 * 1024):.1f} Mo) dépasse la limite "
-                    f"({batch_limit / (1024 * 1024):.0f} Mo). Réduisez la sélection ou augmentez la limite."
-                )
-            else:
-                pref = folder_gcs_prefix(user_prefix, folder_node.rel)
-                ok = 0
-                err_msgs: list[str] = []
-                for f in files:
-                    try:
-                        safe_name = sanitize_upload_filename(f.name)
-                        object_name = f"{pref}{safe_name}"
-                        ctype, _ = mimetypes.guess_type(safe_name)
-                        safe_upload_bytes(
-                            client,
-                            bucket,
-                            object_name,
-                            user_prefix,
-                            f.getvalue(),
-                            ctype,
-                        )
-                        ok += 1
-                    except Exception as ex:
-                        err_msgs.append(f"{f.name}: {ex}")
-                for msg in err_msgs:
-                    st.warning(msg)
-                if ok:
-                    st.success(f"{ok} fichier(s) envoyé(s).")
-                    _gcs_invalidate_index()
-                    _gcs_bump_tree_popover_epoch()
-                    st.rerun()
-                elif not err_msgs:
-                    st.warning("Aucun fichier sélectionné.")
-
-        st.markdown("**Nouveau sous-dossier**")
-        sub = st.text_input(
-            "Nom",
-            key=_safe_widget_key(rel_key, "gcs_f_sub_txt"),
-            placeholder="nom-du-dossier",
-            label_visibility="collapsed",
-        )
-        if st.button(
-            "Créer le sous-dossier",
-            key=_safe_widget_key(rel_key, "gcs_f_sub_btn"),
-            width="stretch",
-        ):
-            if not (sub or "").strip():
-                st.warning("Entrez un nom.")
-            else:
+    st.markdown("**Envoyer des fichiers**")
+    batch_limit = _gcs_batch_upload_limit_bytes()
+    st.caption(
+        f"Sélection multiple autorisée — taille totale max : **{batch_limit // (1024 * 1024)} Mo** "
+    )
+    up = st.file_uploader(
+        "Fichiers",
+        type=["pdf", "md", "markdown", "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif"],
+        accept_multiple_files=True,
+        key=_safe_widget_key(rel_key, "gcs_f_up"),
+        label_visibility="collapsed",
+    )
+    if up and st.button(
+        "Envoyer vers ce dossier",
+        key=_safe_widget_key(rel_key, "gcs_f_up_do"),
+        width="stretch",
+    ):
+        files = list(up)
+        total_bytes = sum(len(f.getvalue()) for f in files)
+        if total_bytes > batch_limit:
+            st.error(
+                f"Taille totale ({total_bytes / (1024 * 1024):.1f} Mo) dépasse la limite "
+                f"({batch_limit / (1024 * 1024):.0f} Mo). Réduisez la sélection ou augmentez la limite."
+            )
+        else:
+            pref = folder_gcs_prefix(user_prefix, folder_node.rel)
+            ok = 0
+            err_msgs: list[str] = []
+            for f in files:
                 try:
-                    create_subfolder_placeholder(
-                        client, bucket, user_prefix, folder_node.rel, sub
+                    safe_name = sanitize_upload_filename(f.name)
+                    object_name = f"{pref}{safe_name}"
+                    ctype, _ = mimetypes.guess_type(safe_name)
+                    safe_upload_bytes(
+                        client,
+                        bucket,
+                        object_name,
+                        user_prefix,
+                        f.getvalue(),
+                        ctype,
                     )
-                    st.success("Dossier créé.")
-                    _gcs_invalidate_index()
-                    _gcs_bump_tree_popover_epoch()
-                    st.rerun()
+                    ok += 1
                 except Exception as ex:
-                    st.error(str(ex))
+                    err_msgs.append(f"{f.name}: {ex}")
+            for msg in err_msgs:
+                st.warning(msg)
+            if ok:
+                st.success(f"{ok} fichier(s) envoyé(s).")
+                _gcs_invalidate_index()
+                _dismiss_folder_menu()
+                _gcs_bump_tree_popover_epoch()
+                st.rerun()
+            elif not err_msgs:
+                st.warning("Aucun fichier sélectionné.")
+
+    st.markdown("**Nouveau sous-dossier**")
+    sub = st.text_input(
+        "Nom",
+        key=_safe_widget_key(rel_key, "gcs_f_sub_txt"),
+        placeholder="nom-du-dossier",
+        label_visibility="collapsed",
+    )
+    if st.button(
+        "Créer le sous-dossier",
+        key=_safe_widget_key(rel_key, "gcs_f_sub_btn"),
+        width="stretch",
+    ):
+        if not (sub or "").strip():
+            st.warning("Entrez un nom.")
+        else:
+            try:
+                create_subfolder_placeholder(
+                    client, bucket, user_prefix, folder_node.rel, sub
+                )
+                st.success("Dossier créé.")
+                _gcs_invalidate_index()
+                _dismiss_folder_menu()
+                _gcs_bump_tree_popover_epoch()
+                st.rerun()
+            except Exception as ex:
+                st.error(str(ex))
+
+
+@st.dialog("Actions sur le dossier", on_dismiss=_dismiss_folder_menu, width="medium")
+def _folder_menu_dialog() -> None:
+    rel = st.session_state.get(_SESSION_FOLDER_MENU_REL)
+    root = st.session_state.get(_SESSION_TREE_ROOT)
+    bucket = st.session_state.get(_SESSION_FOLDER_MENU_BUCKET)
+    user_prefix = st.session_state.get(_SESSION_FOLDER_MENU_USER_PREFIX)
+    if not rel or not bucket or not user_prefix or root is None:
+        return
+    node = _find_tree_node_by_rel(root, rel)
+    if node is None:
+        return
+    _render_folder_menu_content(
+        node,
+        bucket,
+        user_prefix,
+        allow_delete_folder=(node.rel != Path(".")),
+    )
+
+
+def _maybe_open_folder_menu_dialog() -> None:
+    """Open the folder menu dialog when the user clicked ⋮ (popover was clipped in the scroll panel)."""
+    rel = st.session_state.get(_SESSION_FOLDER_MENU_REL)
+    if not rel:
+        return
+    root = st.session_state.get(_SESSION_TREE_ROOT)
+    if root is None:
+        _dismiss_folder_menu()
+        return
+    if _find_tree_node_by_rel(root, rel) is None:
+        _dismiss_folder_menu()
+        return
+    _folder_menu_dialog()
+
+
+def _folder_menu_open_button(folder_node: TreeNode) -> None:
+    rel_key = folder_node.rel.as_posix()
+    pop_epoch = int(st.session_state.get(_GCS_TREE_POPOVER_EPOCH, 0))
+    btn_key = f"gcs_tree_pop_{pop_epoch}_{hashlib.sha256(rel_key.encode()).hexdigest()[:16]}"
+    if st.button("\u22EE", help="Actions sur le dossier", key=btn_key):
+        st.session_state[_SESSION_FOLDER_MENU_REL] = rel_key
 
 
 def _render_file_tree(
@@ -1171,14 +1232,14 @@ def _render_file_tree(
         with head[0]:
             st.caption("Racine de votre espace")
         with head[1]:
-            _folder_menu_popover(node, bucket, user_prefix, allow_delete_folder=False)
+            _folder_menu_open_button(node)
 
     if node.children:
         for child in node.children:
             with st.expander(f"\U0001f4c1 {child.name}", expanded=False):
                 row = st.columns([5, 1])
                 with row[1]:
-                    _folder_menu_popover(child, bucket, user_prefix, allow_delete_folder=True)
+                    _folder_menu_open_button(child)
                 with row[0]:
                     st.markdown("")
                 _render_file_tree(child, bucket, user_prefix, path_to_object)
@@ -1324,6 +1385,9 @@ def main() -> None:
     fp = gcs_index_fingerprint(entries)
     tree, path_map = build_tree_from_gcs_entries(entries, bucket, user_prefix)
     st.session_state["_gcs_path_to_object"] = path_map
+    st.session_state[_SESSION_TREE_ROOT] = tree
+    st.session_state[_SESSION_FOLDER_MENU_BUCKET] = bucket
+    st.session_state[_SESSION_FOLDER_MENU_USER_PREFIX] = user_prefix
     corpus = file_text_index_gcs(_CACHE_SERIAL, bucket, user_prefix, fp)
 
     with st.sidebar:
@@ -1361,6 +1425,8 @@ def main() -> None:
             st.caption(f"**{n_final}** dossiers finaux indexés")
         with right:
             _render_gcs_document_viewer(bucket)
+
+        _maybe_open_folder_menu_dialog()
 
     with tab_analyse:
         _render_match_cards(corpus, kw_entries)
