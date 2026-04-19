@@ -10,6 +10,7 @@ import io
 import mimetypes
 import os
 import re
+import tomllib
 import uuid
 from html import escape
 from pathlib import Path
@@ -115,6 +116,46 @@ _KW_CSV_EXPORT_BTN_CSS = """
     div.st-key-kw_csv_export_btn[data-testid="stDownloadButton"] button:focus-visible,
     div.st-key-kw_csv_export_btn button:focus-visible {
         box-shadow: rgb(255, 255, 255) 0px 0px 0px 2px, rgb(37, 99, 235) 0px 0px 0px 4px !important;
+    }
+</style>
+"""
+
+# Hide Streamlit’s top chrome without hiding ``stToolbar``: the expand-sidebar control
+# (``stExpandSidebarButton``) lives inside the toolbar — hiding the whole toolbar made
+# the sidebar impossible to reopen when collapsed.
+_HIDE_STREAMLIT_TOP_CHROME_CSS = """
+<style>
+    div[data-testid="stDecoration"] {
+        display: none !important;
+    }
+    div[data-testid="stAppDeployButton"],
+    div[data-testid="stToolbarActions"],
+    div[data-testid="stMainMenu"] {
+        display: none !important;
+    }
+    header[data-testid="stHeader"] {
+        background: transparent;
+        box-shadow: none;
+    }
+    button[data-testid="stExpandSidebarButton"],
+    button[data-testid="stSidebarCollapseButton"] {
+        background-color: rgb(235, 238, 242) !important;
+        color: rgb(71, 85, 105) !important;
+        border: 1px solid rgb(203, 213, 225) !important;
+        border-radius: 8px !important;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06) !important;
+    }
+    button[data-testid="stExpandSidebarButton"]:hover,
+    button[data-testid="stSidebarCollapseButton"]:hover {
+        background-color: rgb(226, 232, 240) !important;
+        border-color: rgb(186, 199, 216) !important;
+    }
+    button[data-testid="stExpandSidebarButton"]:focus-visible,
+    button[data-testid="stSidebarCollapseButton"]:focus-visible {
+        box-shadow: rgb(255, 255, 255) 0 0 0 2px, rgb(148, 163, 184) 0 0 0 4px !important;
+    }
+    .stMain .block-container {
+        padding-top: 1.25rem !important;
     }
 </style>
 """
@@ -243,8 +284,39 @@ def _user_storage_prefix() -> str | None:
     return None
 
 
+def _app_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("dossier-analyzer")
+    except Exception:
+        pass
+    try:
+        pyproject = Path(__file__).resolve().parent / "pyproject.toml"
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        ver = (data.get("project") or {}).get("version")
+        if isinstance(ver, str) and ver.strip():
+            return ver.strip()
+    except Exception:
+        pass
+    return "dev"
+
+
+def _render_title_with_version() -> None:
+    v = escape(_app_version())
+    left, right = st.columns([5, 1], gap="small")
+    with left:
+        st.title("Dossier Analyzer")
+    with right:
+        st.markdown(
+            f'<p style="text-align:right;margin:0;padding-top:1rem;font-size:0.7rem;line-height:1.2;'
+            f'color:rgba(49,51,63,0.5);">v{v}</p>',
+            unsafe_allow_html=True,
+        )
+
+
 def _render_login_gate() -> None:
-    st.title("Dossier Analyzer")
+    _render_title_with_version()
     st.header("Connexion requise")
     st.caption("Connectez-vous pour accéder à vos dossiers dans le stockage cloud.")
     st.button("Se connecter avec Google", on_click=st.login, type="primary")
@@ -1217,6 +1289,7 @@ def _render_gcs_document_viewer(bucket: str) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Dossier Analyzer", layout="wide")
+    st.markdown(_HIDE_STREAMLIT_TOP_CHROME_CSS, unsafe_allow_html=True)
     _ensure_session()
 
     if not bool(getattr(st.user, "is_logged_in", False)):
@@ -1226,14 +1299,14 @@ def main() -> None:
     bucket = _gcs_bucket_name()
     user_prefix = _user_storage_prefix()
     if not bucket:
-        st.title("Dossier Analyzer")
+        _render_title_with_version()
         st.error(
             "Stockage cloud non configuré. Définissez `gcp.bucket_name` dans `.streamlit/secrets.toml` "
             "ou la variable d’environnement `GCS_BUCKET_NAME`."
         )
         st.stop()
     if not user_prefix:
-        st.title("Dossier Analyzer")
+        _render_title_with_version()
         st.error("Impossible de résoudre l’identité utilisateur pour le stockage.")
         st.stop()
 
@@ -1241,7 +1314,7 @@ def main() -> None:
         st.session_state.browse_root = _GCS_WORKSPACE_MARKER
         st.session_state.selected_file = None
 
-    st.title("Dossier Analyzer")
+    _render_title_with_version()
     st.caption("Exploration cloud et analyse par mots-clés.")
 
     client = _gcs_client_app()
